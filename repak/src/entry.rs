@@ -83,7 +83,7 @@ enum CompressionIndexSize {
     U32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Entry {
     pub offset: u64,
     pub compressed: u64,
