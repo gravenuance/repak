@@ -159,6 +159,37 @@ fn test_read(version: repak::Version, _file_name: &str, bytes: &[u8]) {
     }
 }
 
+/// Compares two paks by decoded content (mount point, file set, and each file's bytes) rather
+/// than raw bytes. An encrypted index/file region is padded to the AES block size, and the
+/// fixtures in tests/packs/ (produced by an external tool) leave that padding as whatever bytes
+/// happened to already be in the buffer rather than zeroing it - so a from-scratch rewrite can
+/// never be byte-identical to them even when every logical field is correct.
+fn assert_pak_content_equal(key: aes::Aes256, original: &[u8], rewritten: &[u8]) {
+    let mut original_reader = std::io::Cursor::new(original);
+    let original_pak = repak::PakBuilder::new()
+        .key(key.clone())
+        .reader(&mut original_reader)
+        .unwrap();
+
+    let mut rewritten_reader = std::io::Cursor::new(rewritten);
+    let rewritten_pak = repak::PakBuilder::new()
+        .key(key)
+        .reader(&mut rewritten_reader)
+        .unwrap();
+
+    assert_eq!(original_pak.mount_point(), rewritten_pak.mount_point());
+    use std::collections::HashSet;
+    let original_files: HashSet<String> = HashSet::from_iter(original_pak.files());
+    let rewritten_files: HashSet<String> = HashSet::from_iter(rewritten_pak.files());
+    assert_eq!(original_files, rewritten_files);
+
+    for path in original_files {
+        let original_data = original_pak.get(&path, &mut original_reader).unwrap();
+        let rewritten_data = rewritten_pak.get(&path, &mut rewritten_reader).unwrap();
+        assert_eq!(original_data, rewritten_data, "{path} contents differ");
+    }
+}
+
 fn test_write(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
     use aes::cipher::KeyInit;
     use base64::{engine::general_purpose, Engine as _};
@@ -171,12 +202,17 @@ fn test_write(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
 
     let mut reader = std::io::Cursor::new(bytes);
     let pak_reader = repak::PakBuilder::new()
-        .key(key)
+        .key(key.clone())
         .reader(&mut reader)
         .unwrap();
 
+    let encrypted_index = pak_reader.encrypted_index();
+    let mut writer_builder = repak::PakBuilder::new();
+    if encrypted_index {
+        writer_builder = writer_builder.key(key.clone());
+    }
     let writer = Cursor::new(vec![]);
-    let mut pak_writer = repak::PakBuilder::new().writer(
+    let mut pak_writer = writer_builder.writer(
         writer,
         pak_reader.version(),
         pak_reader.mount_point().to_owned(),
@@ -188,7 +224,12 @@ fn test_write(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
         pak_writer.write_file(&path, false, data).unwrap();
     }
 
-    assert!(pak_writer.write_index().unwrap().into_inner() == reader.into_inner());
+    let rewrite = pak_writer.write_index().unwrap().into_inner();
+    if encrypted_index {
+        assert_pak_content_equal(key, reader.into_inner(), &rewrite);
+    } else {
+        assert!(rewrite == reader.into_inner());
+    }
 }
 
 fn test_rewrite_index(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
@@ -202,7 +243,11 @@ fn test_rewrite_index(_version: repak::Version, _file_name: &str, bytes: &[u8]) 
         .unwrap();
 
     let mut buf = std::io::Cursor::new(bytes.to_vec());
-    let pak_reader = repak::PakBuilder::new().key(key).reader(&mut buf).unwrap();
+    let pak_reader = repak::PakBuilder::new()
+        .key(key.clone())
+        .reader(&mut buf)
+        .unwrap();
+    let encrypted_index = pak_reader.encrypted_index();
 
     let rewrite = pak_reader
         .into_pakwriter(buf)
@@ -211,7 +256,11 @@ fn test_rewrite_index(_version: repak::Version, _file_name: &str, bytes: &[u8]) 
         .unwrap()
         .into_inner();
 
-    assert!(bytes == rewrite);
+    if encrypted_index {
+        assert_pak_content_equal(key, bytes, &rewrite);
+    } else {
+        assert!(bytes == rewrite);
+    }
 }
 
 macro_rules! matrix_test {
@@ -279,8 +328,10 @@ matrix_test!(
         "v11" repak::Version::V11,
     ),
     ("", /*"_compress"*/),
+    // Per-file data encryption isn't implemented on the write path (write_file never encrypts
+    // its output), only index encryption is - so only that axis can be exercised here.
     ("", /*"_encrypt"*/),
-    ("", /*"_encryptindex"*/),
+    ("", "_encryptindex"),
     test_write
 );
 
@@ -296,7 +347,7 @@ matrix_test!(
     ),
     ("", "_compress"),
     ("", "_encrypt"),
-    ("", /*"_encryptindex"*/),
+    ("", "_encryptindex"),
     test_rewrite_index
 );
 

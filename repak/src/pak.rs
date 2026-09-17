@@ -273,8 +273,16 @@ impl<W: Write + Seek> PakWriter<W> {
         path_hash_seed: Option<u64>,
         allowed_compression: Vec<Compression>,
     ) -> Self {
+        let mut pak = Pak::new(version, mount_point, path_hash_seed);
+        // A fresh pak has no prior encrypted-index state to preserve, so it's inferred from
+        // whether the caller handed the builder a key at all.
+        pak.encrypted_index = match key {
+            #[cfg(feature = "encryption")]
+            super::Key::Some(_) => true,
+            _ => false,
+        };
         PakWriter {
-            pak: Pak::new(version, mount_point, path_hash_seed),
+            pak,
             writer,
             key,
             allowed_compression,
@@ -532,11 +540,18 @@ impl Pak {
         })
     }
 
-    fn write<W: Write + Seek>(
-        &self,
-        writer: &mut W,
-        _key: &super::Key,
-    ) -> Result<(), super::Error> {
+    fn write<W: Write + Seek>(&self, writer: &mut W, key: &super::Key) -> Result<(), super::Error> {
+        // Whether a key is merely available (e.g. to decrypt other parts of the pak) is a
+        // separate question from whether *this* pak's index should be (re-)encrypted; the
+        // latter is a property of the pak itself, preserved from the original on a rewrite or
+        // set from key-presence when the pak is created fresh (see `PakWriter::new_inner`).
+        let should_encrypt = self.encrypted_index
+            && match key {
+                #[cfg(feature = "encryption")]
+                super::Key::Some(_) => true,
+                _ => false,
+            };
+
         let index_offset = writer.stream_position()?;
 
         let mut index_buf = vec![];
@@ -608,7 +623,21 @@ impl Pak {
                 size
             };
 
-            let path_hash_index_offset = index_offset + bytes_before_phi;
+            // When encrypting, index_buf itself gets zero-padded to a full AES block right
+            // before it's written to disk (see below) - phi_buf lands after that padding, not
+            // right after the logical (unpadded) content, so the offset recorded here has to
+            // account for it up front or the reader will seek to the wrong place.
+            let bytes_before_phi_on_disk = if should_encrypt {
+                let remainder = bytes_before_phi % 16;
+                if remainder == 0 {
+                    bytes_before_phi
+                } else {
+                    bytes_before_phi + (16 - remainder)
+                }
+            } else {
+                bytes_before_phi
+            };
+            let path_hash_index_offset = index_offset + bytes_before_phi_on_disk;
 
             let mut phi_buf = vec![];
             let mut phi_writer = io::Cursor::new(&mut phi_buf);
@@ -618,22 +647,37 @@ impl Pak {
                 &self.index.entries,
                 &offsets,
             )?;
+            // Hash the logical (unpadded) content - the hash documents what the data *is*, not
+            // the incidental AES padding tacked on next.
+            let phi_hash = hash(&phi_buf);
+            // Pad to a full AES block *before* its length is recorded below - the recorded
+            // size is what the reader will read-and-decrypt as one unit, so it must already
+            // match what ends up on disk once encrypted.
+            #[cfg(feature = "encryption")]
+            if should_encrypt {
+                pad_to_aes_block(&mut phi_buf);
+            }
 
             let full_directory_index_offset = path_hash_index_offset + phi_buf.len() as u64;
 
             let mut fdi_buf = vec![];
             let mut fdi_writer = io::Cursor::new(&mut fdi_buf);
             generate_full_directory_index(&mut fdi_writer, &self.index.entries, &offsets)?;
+            let fdi_hash = hash(&fdi_buf);
+            #[cfg(feature = "encryption")]
+            if should_encrypt {
+                pad_to_aes_block(&mut fdi_buf);
+            }
 
             index_writer.write_u32::<LE>(1)?; // we have path hash index
             index_writer.write_u64::<LE>(path_hash_index_offset)?;
             index_writer.write_u64::<LE>(phi_buf.len() as u64)?; // path hash index size
-            index_writer.write_all(&hash(&phi_buf).0)?;
+            index_writer.write_all(&phi_hash.0)?;
 
             index_writer.write_u32::<LE>(1)?; // we have full directory index
             index_writer.write_u64::<LE>(full_directory_index_offset)?;
             index_writer.write_u64::<LE>(fdi_buf.len() as u64)?; // path hash index size
-            index_writer.write_all(&hash(&fdi_buf).0)?;
+            index_writer.write_all(&fdi_hash.0)?;
 
             index_writer.write_u32::<LE>(encoded_entries.len() as u32)?;
             index_writer.write_all(&encoded_entries)?;
@@ -645,16 +689,43 @@ impl Pak {
 
         let index_hash = hash(&index_buf);
 
+        #[cfg_attr(not(feature = "encryption"), allow(unused_mut))]
+        let mut secondary_index = secondary_index;
+        let is_encrypted;
+        #[cfg(feature = "encryption")]
+        {
+            if should_encrypt {
+                let super::Key::Some(cipher) = key else {
+                    unreachable!("should_encrypt implies key is Key::Some");
+                };
+                pad_to_aes_block(&mut index_buf);
+                encrypt(cipher.clone(), &mut index_buf);
+                if let Some((phi_buf, fdi_buf)) = secondary_index.as_mut() {
+                    // Already padded to a full AES block above, before their sizes were
+                    // recorded into index_buf.
+                    encrypt(cipher.clone(), phi_buf);
+                    encrypt(cipher.clone(), fdi_buf);
+                }
+                is_encrypted = true;
+            } else {
+                is_encrypted = false;
+            }
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            is_encrypted = false;
+        }
+
         writer.write_all(&index_buf)?;
 
-        if let Some((phi_buf, fdi_buf)) = secondary_index {
+        if let Some((phi_buf, fdi_buf)) = &secondary_index {
             writer.write_all(&phi_buf[..])?;
             writer.write_all(&fdi_buf[..])?;
         }
 
         let footer = super::footer::Footer {
-            encryption_uuid: None,
-            encrypted: false,
+            encryption_uuid: is_encrypted.then_some(0),
+            encrypted: is_encrypted,
             magic: super::MAGIC,
             version: self.version,
             version_major: self.version.version_major(),
@@ -668,6 +739,17 @@ impl Pak {
         footer.write(writer)?;
 
         Ok(())
+    }
+}
+
+/// AES operates on fixed 16-byte blocks; pad with zeros to a full block so the cipher never
+/// receives a short final chunk (the reader re-derives the logical length from the fields it
+/// reads in order and simply never reaches the trailing padding bytes).
+#[cfg(feature = "encryption")]
+fn pad_to_aes_block(buf: &mut Vec<u8>) {
+    let remainder = buf.len() % 16;
+    if remainder != 0 {
+        buf.resize(buf.len() + (16 - remainder), 0);
     }
 }
 
