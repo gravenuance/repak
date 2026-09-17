@@ -1,4 +1,4 @@
-use crate::{data::build_partial_entry, Error, Hash};
+use crate::{data::build_partial_entry, variant::EncryptionContext, Error, Hash};
 
 use super::{ext::BoolExt, ext::ReadExt, Compression, Version, VersionMajor};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
@@ -103,9 +103,10 @@ impl Entry {
         version: Version,
         compression_slots: &mut Vec<Option<Compression>>,
         allowed_compression: &[Compression],
+        ctx: EncryptionContext,
         data: &[u8],
     ) -> Result<Self, Error> {
-        let partial_entry = build_partial_entry(allowed_compression, data)?;
+        let partial_entry = build_partial_entry(allowed_compression, ctx, version, data)?;
         let stream_position = writer.stream_position()?;
         let entry = partial_entry.build_entry(version, compression_slots, stream_position)?;
         entry.write(writer, version, crate::entry::EntryLocation::Data)?;
@@ -338,7 +339,7 @@ impl Entry {
         reader: &mut R,
         version: Version,
         compression: &[Option<Compression>],
-        #[allow(unused)] key: &super::Key,
+        #[allow(unused)] ctx: EncryptionContext,
         buf: &mut W,
     ) -> Result<(), super::Error> {
         reader.seek(io::SeekFrom::Start(self.offset))?;
@@ -355,13 +356,19 @@ impl Entry {
             return Err(super::Error::Encryption);
             #[cfg(feature = "encryption")]
             {
-                let super::Key::Some(key) = key else {
-                    return Err(super::Error::Encrypted);
-                };
-                use aes::cipher::BlockDecrypt;
-                for block in data.chunks_mut(16) {
-                    key.decrypt_block(aes::Block::from_mut_slice(block))
-                }
+                // The variant decides how many leading bytes of the buffer just read are
+                // actually ciphertext - the whole thing for a standard, fully-encrypted file,
+                // or a hash-derived prefix for a game-specific variant. Anything beyond that
+                // point was never touched by the cipher.
+                let can_grow = self.compression_slot.is_some() || version < Version::V10;
+                let prefix_len = ctx.variant.read_encrypted_len(
+                    ctx.mount_point,
+                    ctx.path,
+                    self.compressed as usize,
+                    can_grow,
+                    data.len(),
+                );
+                crate::data::decrypt(ctx.variant, ctx.key, &mut data[..prefix_len])?;
                 data.truncate(self.compressed as usize);
             }
         }

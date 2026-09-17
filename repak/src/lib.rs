@@ -5,8 +5,9 @@ mod error;
 mod ext;
 mod footer;
 mod pak;
+mod variant;
 
-pub use {data::PartialEntry, error::*, pak::*};
+pub use {data::PartialEntry, error::*, pak::*, variant::PakVariant};
 
 pub const MAGIC: u32 = 0x5A6F12E1;
 
@@ -123,7 +124,7 @@ pub enum Compression {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) enum Key {
     #[cfg(feature = "encryption")]
     Some(aes::Aes256),

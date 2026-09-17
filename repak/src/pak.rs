@@ -1,6 +1,6 @@
 use crate::data::build_partial_entry;
 use crate::entry::Entry;
-use crate::{Compression, Error, PartialEntry};
+use crate::{Compression, Error, PakVariant, PartialEntry};
 
 use super::ext::{ReadExt, WriteExt};
 use super::{Version, VersionMajor};
@@ -19,6 +19,7 @@ impl std::fmt::Debug for Hash {
 #[derive(Debug)]
 pub struct PakBuilder {
     key: super::Key,
+    variant: PakVariant,
     allowed_compression: Vec<Compression>,
 }
 
@@ -32,6 +33,7 @@ impl PakBuilder {
     pub fn new() -> Self {
         Self {
             key: Default::default(),
+            variant: Default::default(),
             allowed_compression: Default::default(),
         }
     }
@@ -40,20 +42,26 @@ impl PakBuilder {
         self.key = super::Key::Some(key);
         self
     }
+    /// Opts into a specific game's deviations from the standard pak format. Leaving this
+    /// unset (the default, `PakVariant::Standard`) never changes behaviour.
+    pub fn variant(mut self, variant: PakVariant) -> Self {
+        self.variant = variant;
+        self
+    }
     #[cfg(feature = "compression")]
     pub fn compression(mut self, compression: impl IntoIterator<Item = Compression>) -> Self {
         self.allowed_compression = compression.into_iter().collect();
         self
     }
     pub fn reader<R: Read + Seek>(self, reader: &mut R) -> Result<PakReader, super::Error> {
-        PakReader::new_any_inner(reader, self.key)
+        PakReader::new_any_inner(reader, self.key, self.variant)
     }
     pub fn reader_with_version<R: Read + Seek>(
         self,
         reader: &mut R,
         version: super::Version,
     ) -> Result<PakReader, super::Error> {
-        PakReader::new_inner(reader, version, self.key)
+        PakReader::new_inner(reader, version, self.key, self.variant)
     }
     pub fn writer<W: Write + Seek>(
         self,
@@ -65,6 +73,7 @@ impl PakBuilder {
         PakWriter::new_inner(
             writer,
             self.key,
+            self.variant,
             version,
             mount_point,
             path_hash_seed,
@@ -77,6 +86,7 @@ impl PakBuilder {
 pub struct PakReader {
     pak: Pak,
     key: super::Key,
+    variant: PakVariant,
 }
 
 #[derive(Debug)]
@@ -84,6 +94,7 @@ pub struct PakWriter<W: Write + Seek> {
     pak: Pak,
     writer: W,
     key: super::Key,
+    variant: PakVariant,
     allowed_compression: Vec<Compression>,
 }
 
@@ -147,30 +158,18 @@ impl Index {
     }
 }
 
-#[cfg(feature = "encryption")]
-fn decrypt(key: &super::Key, bytes: &mut [u8]) -> Result<(), super::Error> {
-    if let super::Key::Some(key) = key {
-        use aes::cipher::BlockDecrypt;
-        for chunk in bytes.chunks_mut(16) {
-            key.decrypt_block(aes::Block::from_mut_slice(chunk))
-        }
-        Ok(())
-    } else {
-        Err(super::Error::Encrypted)
-    }
-}
-
 impl PakReader {
     fn new_any_inner<R: Read + Seek>(
         reader: &mut R,
         key: super::Key,
+        variant: PakVariant,
     ) -> Result<Self, super::Error> {
         use std::fmt::Write;
         let mut log = "\n".to_owned();
 
         for ver in Version::iter() {
-            match Pak::read(&mut *reader, ver, &key) {
-                Ok(pak) => return Ok(Self { pak, key }),
+            match Pak::read(&mut *reader, ver, &key, variant) {
+                Ok(pak) => return Ok(Self { pak, key, variant }),
                 Err(err) => writeln!(log, "trying version {} failed: {}", ver, err)?,
             }
         }
@@ -181,8 +180,9 @@ impl PakReader {
         reader: &mut R,
         version: super::Version,
         key: super::Key,
+        variant: PakVariant,
     ) -> Result<Self, super::Error> {
-        Pak::read(reader, version, &key).map(|pak| Self { pak, key })
+        Pak::read(reader, version, &key, variant).map(|pak| Self { pak, key, variant })
     }
 
     pub fn version(&self) -> super::Version {
@@ -218,13 +218,15 @@ impl PakReader {
         writer: &mut W,
     ) -> Result<(), super::Error> {
         match self.pak.index.entries().get(path) {
-            Some(entry) => entry.read_file(
-                reader,
-                self.pak.version,
-                &self.pak.compression,
-                &self.key,
-                writer,
-            ),
+            Some(entry) => {
+                let ctx = crate::variant::EncryptionContext {
+                    key: &self.key,
+                    variant: self.variant,
+                    mount_point: &self.pak.mount_point,
+                    path,
+                };
+                entry.read_file(reader, self.pak.version, &self.pak.compression, ctx, writer)
+            }
             None => Err(super::Error::MissingEntry(path.to_owned())),
         }
     }
@@ -259,6 +261,7 @@ impl PakReader {
             allowed_compression: self.pak.compression.iter().filter_map(|c| *c).collect(),
             pak: self.pak,
             key: self.key,
+            variant: self.variant,
             writer,
         })
     }
@@ -268,6 +271,7 @@ impl<W: Write + Seek> PakWriter<W> {
     fn new_inner(
         writer: W,
         key: super::Key,
+        variant: PakVariant,
         version: Version,
         mount_point: String,
         path_hash_seed: Option<u64>,
@@ -285,6 +289,7 @@ impl<W: Write + Seek> PakWriter<W> {
             pak,
             writer,
             key,
+            variant,
             allowed_compression,
         }
     }
@@ -299,6 +304,12 @@ impl<W: Write + Seek> PakWriter<W> {
         allow_compress: bool,
         data: impl AsRef<[u8]>,
     ) -> Result<(), super::Error> {
+        let ctx = crate::variant::EncryptionContext {
+            key: &self.key,
+            variant: self.variant,
+            mount_point: &self.pak.mount_point,
+            path,
+        };
         self.pak.index.add_entry(
             path.to_string(),
             Entry::write_file(
@@ -310,6 +321,7 @@ impl<W: Write + Seek> PakWriter<W> {
                 } else {
                     &[]
                 },
+                ctx,
                 data.as_ref(),
             )?,
         );
@@ -320,6 +332,10 @@ impl<W: Write + Seek> PakWriter<W> {
     pub fn entry_builder(&self) -> EntryBuilder {
         EntryBuilder {
             allowed_compression: self.allowed_compression.clone(),
+            key: self.key.clone(),
+            variant: self.variant,
+            version: self.pak.version,
+            mount_point: self.pak.mount_point.clone(),
         }
     }
 
@@ -348,7 +364,7 @@ impl<W: Write + Seek> PakWriter<W> {
         Ok(())
     }
     pub fn write_index(mut self) -> Result<W, super::Error> {
-        self.pak.write(&mut self.writer, &self.key)?;
+        self.pak.write(&mut self.writer, &self.key, self.variant)?;
         Ok(self.writer)
     }
 }
@@ -363,12 +379,17 @@ impl AsRef<[u8]> for Data<'_> {
 #[derive(Clone)]
 pub struct EntryBuilder {
     allowed_compression: Vec<Compression>,
+    key: super::Key,
+    variant: PakVariant,
+    version: Version,
+    mount_point: String,
 }
 impl EntryBuilder {
     /// Builds an entry in memory (compressed if requested) which must be written out later
     pub fn build_entry<D: AsRef<[u8]> + Send + Sync>(
         &self,
         compress: bool,
+        path: &str,
         data: D,
     ) -> Result<PartialEntry<D>, Error> {
         let compression = if compress {
@@ -376,7 +397,13 @@ impl EntryBuilder {
         } else {
             &[]
         };
-        build_partial_entry(compression, data)
+        let ctx = crate::variant::EncryptionContext {
+            key: &self.key,
+            variant: self.variant,
+            mount_point: &self.mount_point,
+            path,
+        };
+        build_partial_entry(compression, ctx, self.version, data)
     }
 }
 
@@ -385,6 +412,7 @@ impl Pak {
         reader: &mut R,
         version: super::Version,
         #[allow(unused)] key: &super::Key,
+        #[allow(unused)] variant: PakVariant,
     ) -> Result<Self, super::Error> {
         // read footer to get index, encryption & compression info
         reader.seek(io::SeekFrom::End(-version.size()))?;
@@ -399,7 +427,7 @@ impl Pak {
             #[cfg(not(feature = "encryption"))]
             return Err(super::Error::Encryption);
             #[cfg(feature = "encryption")]
-            decrypt(key, &mut index)?;
+            crate::data::decrypt(variant, key, &mut index)?;
         }
 
         let mut index = io::Cursor::new(index);
@@ -423,7 +451,7 @@ impl Pak {
                     #[cfg(not(feature = "encryption"))]
                     return Err(super::Error::Encryption);
                     #[cfg(feature = "encryption")]
-                    decrypt(key, &mut path_hash_index_buf)?;
+                    crate::data::decrypt(variant, key, &mut path_hash_index_buf)?;
                 }
 
                 let mut path_hash_index = vec![];
@@ -455,7 +483,7 @@ impl Pak {
                     #[cfg(not(feature = "encryption"))]
                     return Err(super::Error::Encryption);
                     #[cfg(feature = "encryption")]
-                    decrypt(key, &mut full_directory_index)?;
+                    crate::data::decrypt(variant, key, &mut full_directory_index)?;
                 }
                 let mut fdi = io::Cursor::new(full_directory_index);
 
@@ -540,7 +568,12 @@ impl Pak {
         })
     }
 
-    fn write<W: Write + Seek>(&self, writer: &mut W, key: &super::Key) -> Result<(), super::Error> {
+    fn write<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+        key: &super::Key,
+        variant: PakVariant,
+    ) -> Result<(), super::Error> {
         // Whether a key is merely available (e.g. to decrypt other parts of the pak) is a
         // separate question from whether *this* pak's index should be (re-)encrypted; the
         // latter is a property of the pak itself, preserved from the original on a rewrite or
@@ -655,7 +688,7 @@ impl Pak {
             // match what ends up on disk once encrypted.
             #[cfg(feature = "encryption")]
             if should_encrypt {
-                pad_to_aes_block(&mut phi_buf);
+                crate::data::pad_zeros_to_alignment(&mut phi_buf, 16);
             }
 
             let full_directory_index_offset = path_hash_index_offset + phi_buf.len() as u64;
@@ -666,7 +699,7 @@ impl Pak {
             let fdi_hash = hash(&fdi_buf);
             #[cfg(feature = "encryption")]
             if should_encrypt {
-                pad_to_aes_block(&mut fdi_buf);
+                crate::data::pad_zeros_to_alignment(&mut fdi_buf, 16);
             }
 
             index_writer.write_u32::<LE>(1)?; // we have path hash index
@@ -698,13 +731,13 @@ impl Pak {
                 let super::Key::Some(cipher) = key else {
                     unreachable!("should_encrypt implies key is Key::Some");
                 };
-                pad_to_aes_block(&mut index_buf);
-                encrypt(cipher.clone(), &mut index_buf);
+                crate::data::pad_zeros_to_alignment(&mut index_buf, 16);
+                crate::data::encrypt(variant, cipher, &mut index_buf);
                 if let Some((phi_buf, fdi_buf)) = secondary_index.as_mut() {
                     // Already padded to a full AES block above, before their sizes were
                     // recorded into index_buf.
-                    encrypt(cipher.clone(), phi_buf);
-                    encrypt(cipher.clone(), fdi_buf);
+                    crate::data::encrypt(variant, cipher, phi_buf);
+                    crate::data::encrypt(variant, cipher, fdi_buf);
                 }
                 is_encrypted = true;
             } else {
@@ -723,6 +756,10 @@ impl Pak {
             writer.write_all(&fdi_buf[..])?;
         }
 
+        // Some games (see `PakVariant`) expect a fixed trailer here, independent of whether
+        // the index itself ended up encrypted.
+        writer.write_all(variant.index_trailer())?;
+
         let footer = super::footer::Footer {
             encryption_uuid: is_encrypted.then_some(0),
             encrypted: is_encrypted,
@@ -739,17 +776,6 @@ impl Pak {
         footer.write(writer)?;
 
         Ok(())
-    }
-}
-
-/// AES operates on fixed 16-byte blocks; pad with zeros to a full block so the cipher never
-/// receives a short final chunk (the reader re-derives the logical length from the fields it
-/// reads in order and simply never reaches the trailing padding bytes).
-#[cfg(feature = "encryption")]
-fn pad_to_aes_block(buf: &mut Vec<u8>) {
-    let remainder = buf.len() % 16;
-    if remainder != 0 {
-        buf.resize(buf.len() + (16 - remainder), 0);
     }
 }
 
@@ -840,14 +866,6 @@ fn generate_full_directory_index<W: Write>(
     }
 
     Ok(())
-}
-
-#[cfg(feature = "encryption")]
-fn encrypt(key: aes::Aes256, bytes: &mut [u8]) {
-    use aes::cipher::BlockEncrypt;
-    for chunk in bytes.chunks_mut(16) {
-        key.encrypt_block(aes::Block::from_mut_slice(chunk))
-    }
 }
 
 #[cfg(test)]

@@ -151,8 +151,26 @@ struct Args {
     #[arg(short, long)]
     aes_key: Option<AesKey>,
 
+    /// Support a specific game's deviations from the standard Unreal Engine pak format
+    #[arg(long, value_enum, default_value_t = PakVariantArg::Standard)]
+    variant: PakVariantArg,
+
     #[command(subcommand)]
     action: Action,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PakVariantArg {
+    Standard,
+    MarvelRivals,
+}
+impl From<PakVariantArg> for repak::PakVariant {
+    fn from(variant: PakVariantArg) -> Self {
+        match variant {
+            PakVariantArg::Standard => repak::PakVariant::Standard,
+            PakVariantArg::MarvelRivals => repak::PakVariant::MarvelRivals,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,19 +197,24 @@ impl std::str::FromStr for AesKey {
 fn main() -> Result<(), repak::Error> {
     let args = Args::parse();
     let aes_key = args.aes_key.map(|k| k.0);
+    let variant: repak::PakVariant = args.variant.into();
 
     match args.action {
-        Action::Info(action) => info(aes_key, action),
-        Action::List(action) => list(aes_key, action),
-        Action::HashList(action) => hash_list(aes_key, action),
-        Action::Unpack(action) => unpack(aes_key, action),
-        Action::Pack(action) => pack(action),
-        Action::Get(action) => get(aes_key, action),
+        Action::Info(action) => info(aes_key, variant, action),
+        Action::List(action) => list(aes_key, variant, action),
+        Action::HashList(action) => hash_list(aes_key, variant, action),
+        Action::Unpack(action) => unpack(aes_key, variant, action),
+        Action::Pack(action) => pack(aes_key, variant, action),
+        Action::Get(action) => get(aes_key, variant, action),
     }
 }
 
-fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn info(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    action: ActionInfo,
+) -> Result<(), repak::Error> {
+    let mut builder = repak::PakBuilder::new().variant(variant);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -212,8 +235,12 @@ fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), repak::E
     Ok(())
 }
 
-fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn list(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    action: ActionList,
+) -> Result<(), repak::Error> {
+    let mut builder = repak::PakBuilder::new().variant(variant);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -245,8 +272,12 @@ fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::E
     Ok(())
 }
 
-fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn hash_list(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    action: ActionHashList,
+) -> Result<(), repak::Error> {
+    let mut builder = repak::PakBuilder::new().variant(variant);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -317,9 +348,13 @@ impl Output {
     }
 }
 
-fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repak::Error> {
+fn unpack(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    action: ActionUnpack,
+) -> Result<(), repak::Error> {
     for input in &action.input {
-        let mut builder = repak::PakBuilder::new();
+        let mut builder = repak::PakBuilder::new().variant(variant);
         if let Some(aes_key) = aes_key.clone() {
             builder = builder.key(aes_key);
         }
@@ -453,7 +488,11 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
     Ok(())
 }
 
-fn pack(args: ActionPack) -> Result<(), repak::Error> {
+fn pack(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    args: ActionPack,
+) -> Result<(), repak::Error> {
     let output = args.output.map(PathBuf::from).unwrap_or_else(|| {
         // NOTE: don't use `with_extension` here because it will replace e.g. the `.1` in
         // `test_v1.1`.
@@ -482,14 +521,18 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
     collect_files(&mut paths, input_path)?;
     paths.sort();
 
-    let mut pak = repak::PakBuilder::new()
+    let mut pak_builder = repak::PakBuilder::new()
         .compression(args.compression.iter().cloned())
-        .writer(
-            BufWriter::new(File::create(&output)?),
-            args.version,
-            args.mount_point,
-            Some(args.path_hash_seed),
-        );
+        .variant(variant);
+    if let Some(aes_key) = aes_key {
+        pak_builder = pak_builder.key(aes_key);
+    }
+    let mut pak = pak_builder.writer(
+        BufWriter::new(File::create(&output)?),
+        args.version,
+        args.mount_point,
+        Some(args.path_hash_seed),
+    );
 
     use indicatif::ProgressIterator;
 
@@ -524,7 +567,7 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
                         if args.verbose {
                             log.println(format!("packing {}", &rel));
                         }
-                        let entry = entry_builder.build_entry(true, std::fs::read(p)?)?;
+                        let entry = entry_builder.build_entry(true, rel, std::fs::read(p)?)?;
 
                         tx.send((rel.to_string(), entry)).unwrap();
                         Ok(())
@@ -548,9 +591,13 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
     Ok(())
 }
 
-fn get(aes_key: Option<aes::Aes256>, args: ActionGet) -> Result<(), repak::Error> {
+fn get(
+    aes_key: Option<aes::Aes256>,
+    variant: repak::PakVariant,
+    args: ActionGet,
+) -> Result<(), repak::Error> {
     let mut reader = BufReader::new(File::open(&args.input)?);
-    let mut builder = repak::PakBuilder::new();
+    let mut builder = repak::PakBuilder::new().variant(variant);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }

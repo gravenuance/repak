@@ -457,3 +457,119 @@ mod roundtrip {
     roundtrip_tests!(pre_fname: V5, V7);
     roundtrip_tests!(fname: V8A, V8B, V9, V11);
 }
+
+mod marvel_rivals_variant {
+    use std::io::Cursor;
+
+    fn key() -> aes::Aes256 {
+        use aes::cipher::KeyInit;
+        use base64::{engine::general_purpose, Engine as _};
+        let bytes = general_purpose::STANDARD.decode(super::AES_KEY).unwrap();
+        aes::Aes256::new_from_slice(&bytes).unwrap()
+    }
+
+    /// A file bigger than the variant's maximum possible encrypted prefix (4096 bytes), so
+    /// the tail is guaranteed to be a genuine plaintext continuation, not just padding.
+    fn large_file() -> Vec<u8> {
+        (0..20_000u32).flat_map(|i| i.to_le_bytes()).collect()
+    }
+
+    fn build_pak(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let writer = Cursor::new(vec![]);
+        let mut pak_writer = repak::PakBuilder::new()
+            .key(key())
+            .variant(repak::PakVariant::MarvelRivals)
+            .writer(writer, repak::Version::V11, "../../../".to_string(), Some(0));
+        for (path, data) in files {
+            pak_writer.write_file(path, false, *data).unwrap();
+        }
+        pak_writer.write_index().unwrap().into_inner()
+    }
+
+    #[test]
+    fn round_trips_small_and_large_files() {
+        let large = large_file();
+        let files: &[(&str, &[u8])] = &[
+            ("small.txt", b"Hello, Marvel!"),
+            ("empty.txt", b""),
+            ("large.bin", &large),
+        ];
+        let buf = build_pak(files);
+
+        let mut reader = Cursor::new(&buf);
+        let pak_reader = repak::PakBuilder::new()
+            .key(key())
+            .variant(repak::PakVariant::MarvelRivals)
+            .reader(&mut reader)
+            .unwrap();
+
+        for (path, expected) in files {
+            let data = pak_reader.get(path, &mut reader).unwrap();
+            assert_eq!(data, *expected, "mismatched content for {path}");
+        }
+    }
+
+    #[test]
+    fn only_a_prefix_of_a_large_file_is_actually_encrypted_on_disk() {
+        // A large file's tail must survive on disk byte-for-byte as plaintext - if the whole
+        // file were being encrypted (i.e. the variant weren't taking effect), this substring
+        // wouldn't appear verbatim in the output.
+        let large = large_file();
+        let buf = build_pak(&[("large.bin", &large)]);
+        let tail = &large[large.len() - 256..];
+        assert!(
+            buf.windows(tail.len()).any(|w| w == tail),
+            "expected the file's plaintext tail to appear unencrypted in the pak"
+        );
+    }
+
+    #[test]
+    fn reverse_word_order_changes_the_ciphertext() {
+        // Same key, same plaintext, same variant - only the word-order flag differs from a
+        // plain AES-ECB encrypt of the same bytes - so the on-disk bytes must differ, proving
+        // the byte-swap step actually runs rather than being a no-op.
+        let data = b"a sixteen byte block!!".to_vec();
+        let buf = build_pak(&[("f.bin", &data)]);
+
+        let plain_writer = Cursor::new(vec![]);
+        let mut plain_pak_writer = repak::PakBuilder::new().key(key()).writer(
+            plain_writer,
+            repak::Version::V11,
+            "../../../".to_string(),
+            Some(0),
+        );
+        plain_pak_writer.write_file("f.bin", false, &data).unwrap();
+        // Standard variant never encrypts file data on write (see `PakVariant`), so build the
+        // comparison ciphertext directly instead.
+        use aes::cipher::BlockEncrypt;
+        let mut standard_cipher_block = data[..16].to_vec();
+        key().encrypt_block(aes::Block::from_mut_slice(&mut standard_cipher_block));
+
+        assert!(
+            !buf.windows(16).any(|w| w == standard_cipher_block.as_slice()),
+            "expected the Marvel Rivals ciphertext to differ from plain AES-ECB of the same block"
+        );
+    }
+
+    #[test]
+    fn writing_without_a_variant_is_unaffected() {
+        // The whole point of the variant mechanism: not opting in must produce exactly what
+        // repak already produced before this feature existed - a key alone must not encrypt
+        // file data.
+        let data = b"just a normal file, not encrypted".to_vec();
+        let writer = Cursor::new(vec![]);
+        let mut pak_writer = repak::PakBuilder::new().key(key()).writer(
+            writer,
+            repak::Version::V11,
+            "../../../".to_string(),
+            Some(0),
+        );
+        pak_writer.write_file("f.bin", false, &data).unwrap();
+        let buf = pak_writer.write_index().unwrap().into_inner();
+
+        assert!(
+            buf.windows(data.len()).any(|w| w == data.as_slice()),
+            "expected file data to remain plaintext when no variant is selected"
+        );
+    }
+}
