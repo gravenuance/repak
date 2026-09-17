@@ -680,27 +680,26 @@ impl Pak {
                 &self.index.entries,
                 &offsets,
             )?;
-            // Hash the logical (unpadded) content - the hash documents what the data *is*, not
-            // the incidental AES padding tacked on next.
-            let phi_hash = hash(&phi_buf);
-            // Pad to a full AES block *before* its length is recorded below - the recorded
-            // size is what the reader will read-and-decrypt as one unit, so it must already
-            // match what ends up on disk once encrypted.
+            // Pad to a full AES block *before* hashing or recording its length below - the
+            // reader verifies this hash against exactly what it reads and decrypts (the
+            // padded buffer, since it has no way to know where the real content ends and
+            // padding begins), so the hash must cover the same bytes.
             #[cfg(feature = "encryption")]
             if should_encrypt {
                 crate::data::pad_zeros_to_alignment(&mut phi_buf, 16);
             }
+            let phi_hash = hash(&phi_buf);
 
             let full_directory_index_offset = path_hash_index_offset + phi_buf.len() as u64;
 
             let mut fdi_buf = vec![];
             let mut fdi_writer = io::Cursor::new(&mut fdi_buf);
             generate_full_directory_index(&mut fdi_writer, &self.index.entries, &offsets)?;
-            let fdi_hash = hash(&fdi_buf);
             #[cfg(feature = "encryption")]
             if should_encrypt {
                 crate::data::pad_zeros_to_alignment(&mut fdi_buf, 16);
             }
+            let fdi_hash = hash(&fdi_buf);
 
             index_writer.write_u32::<LE>(1)?; // we have path hash index
             index_writer.write_u64::<LE>(path_hash_index_offset)?;
@@ -720,6 +719,12 @@ impl Pak {
             Some((phi_buf, fdi_buf))
         };
 
+        // Pad *before* hashing, for the same reason as phi_buf/fdi_buf above - the reader
+        // verifies this hash against the padded buffer it actually reads and decrypts.
+        #[cfg(feature = "encryption")]
+        if should_encrypt {
+            crate::data::pad_zeros_to_alignment(&mut index_buf, 16);
+        }
         let index_hash = hash(&index_buf);
 
         #[cfg_attr(not(feature = "encryption"), allow(unused_mut))]
@@ -731,7 +736,6 @@ impl Pak {
                 let super::Key::Some(cipher) = key else {
                     unreachable!("should_encrypt implies key is Key::Some");
                 };
-                crate::data::pad_zeros_to_alignment(&mut index_buf, 16);
                 crate::data::encrypt(variant, cipher, &mut index_buf);
                 if let Some((phi_buf, fdi_buf)) = secondary_index.as_mut() {
                     // Already padded to a full AES block above, before their sizes were
