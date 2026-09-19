@@ -723,6 +723,7 @@ dependencies = [
  "strum",
  "thiserror",
  "zstd",
+ "zstd-sys",
 ]
 
 [[package]]

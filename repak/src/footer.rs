@@ -57,6 +57,17 @@ impl Footer {
                 compression.push(Some(Compression::Zlib));
                 compression.push(Some(Compression::Gzip));
                 compression.push(Some(Compression::Oodle));
+                // Slot 3: Zstd is the leading candidate (it's slot 3 in both this crate's
+                // own Compression enum and UAssetAPI's independently-written
+                // PakCompression). The standard framed Zstd decoder cleanly rejected a
+                // real Days Gone V3 pak entry ("Unknown frame descriptor"), but that only
+                // rules out the *framed* form - entry.rs's Zstd arm now also falls back to
+                // ZSTD_decompressBlock for headerless raw blocks, which hasn't been tested
+                // against real data yet. LZ4 was tried here too and also cleanly rejected
+                // ("LZ4 decompression failed"), so it's been moved out of this slot back
+                // to unused-for-now rather than sitting where Zstd's raw-block form has a
+                // real, untested hypothesis.
+                compression.push(Some(Compression::Zstd));
             }
             compression
         };
@@ -114,5 +125,47 @@ impl Footer {
             writer.write_all(&name)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Footer, Hash};
+    use crate::{Compression, Version, VersionMajor};
+
+    /// Regression test: a legacy (pre-FNameBasedCompression) pak version's footer never
+    /// stores compression method names on disk, so `Footer::read` fills in a hardcoded
+    /// fallback list instead of reading one. This list must have exactly as many entries
+    /// as any real-world entry's compression slot can reference - see entry.rs's own
+    /// regression test for what happens when it doesn't (a slot 3 entry from a real V3
+    /// pak used to panic on a 3-element list; the 4th entry, Zstd, was missing).
+    #[test]
+    fn read_fills_in_four_hardcoded_legacy_compression_methods() {
+        let footer = Footer {
+            encryption_uuid: None,
+            encrypted: false,
+            magic: super::super::MAGIC,
+            version: Version::V3,
+            version_major: VersionMajor::CompressionEncryption,
+            index_offset: 0,
+            index_size: 0,
+            hash: Hash([0; 20]),
+            frozen: false,
+            compression: vec![],
+        };
+
+        let mut buf = vec![];
+        footer.write(&mut buf).unwrap();
+        let read_back = Footer::read(&mut std::io::Cursor::new(buf), Version::V3).unwrap();
+
+        assert_eq!(
+            read_back.compression,
+            vec![
+                Some(Compression::Zlib),
+                Some(Compression::Gzip),
+                Some(Compression::Oodle),
+                Some(Compression::Zstd),
+            ]
+        );
     }
 }

@@ -64,6 +64,15 @@ pub enum Error {
     #[error("{0} decompression failed")]
     DecompressionFailed(Compression),
 
+    // Legacy (pre-FNameBasedCompression) pak versions never store their compression method
+    // names in the file - Footer::read hardcodes a fixed-length fallback list instead. An
+    // entry's on-disk compression slot is only ever validated against that list's length
+    // here, at first use, not at footer-parse time - a slot number the fallback list doesn't
+    // cover (seen in the wild: a legacy pak whose 4th slot isn't one of the 3 hardcoded names)
+    // must not be allowed to index past the end of that list.
+    #[error("entry references compression slot {0}, but this pak's version only declares {1} compression method(s)")]
+    UnknownCompressionSlot(u32, usize),
+
     #[error("used version {used} but pak is version {version}")]
     Version {
         used: super::VersionMajor,
