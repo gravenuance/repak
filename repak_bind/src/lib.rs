@@ -76,9 +76,97 @@ impl Seek for Stream {
     }
 }
 
+/// Oodle is the `COMPRESS_Custom` (ECompressionFlags 0x04) codec used by legacy UE4 paks
+/// such as Days Gone's, so a reader with no Oodle decompressor can't open them at all.
+/// `oodle_loader` is deliberately not used here: it pins one exact DLL build by SHA1 and
+/// downloads it over the network when absent, neither of which suits an offline library
+/// embedded in a desktop app. Instead this loads whatever `oo2core_9_win64.dll` sits next
+/// to the host executable (or wherever `REPAK_OODLE_DLL` points) and fails soft - a pak
+/// that needs Oodle then reports `OodleFailed` rather than silently producing garbage.
+mod oodle {
+    use std::os::raw::c_void;
+    use std::sync::OnceLock;
+
+    type OodleLZDecompress = unsafe extern "win64" fn(
+        *const c_void,
+        isize,
+        *mut c_void,
+        isize,
+        i32,
+        i32,
+        i32,
+        *mut c_void,
+        isize,
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        isize,
+        i32,
+    ) -> isize;
+
+    static OODLE: OnceLock<Option<(libloading::Library, OodleLZDecompress)>> = OnceLock::new();
+
+    fn candidate_paths() -> Vec<std::path::PathBuf> {
+        let mut paths = vec![];
+        if let Ok(explicit) = std::env::var("REPAK_OODLE_DLL") {
+            paths.push(std::path::PathBuf::from(explicit));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            paths.push(exe.with_file_name("oo2core_9_win64.dll"));
+        }
+        paths.push(std::path::PathBuf::from("oo2core_9_win64.dll"));
+        paths
+    }
+
+    fn library() -> Option<&'static (libloading::Library, OodleLZDecompress)> {
+        OODLE
+            .get_or_init(|| {
+                candidate_paths().into_iter().find_map(|p| unsafe {
+                    let lib = libloading::Library::new(&p).ok()?;
+                    let sym = *lib
+                        .get::<OodleLZDecompress>(b"OodleLZ_Decompress\0")
+                        .ok()?;
+                    Some((lib, sym))
+                })
+            })
+            .as_ref()
+    }
+
+    fn decompress(comp_buf: &[u8], raw_buf: &mut [u8]) -> i32 {
+        let Some((_lib, f)) = library() else { return 0 };
+        // fuzz_safe=1, check_crc=0, verbosity=0, thread_phase=3 (unthreaded) - the same
+        // argument set retoc/oodle_loader use for reading pak chunks.
+        unsafe {
+            f(
+                comp_buf.as_ptr() as *const c_void,
+                comp_buf.len() as isize,
+                raw_buf.as_mut_ptr() as *mut c_void,
+                raw_buf.len() as isize,
+                1,
+                0,
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                3,
+            ) as i32
+        }
+    }
+
+    pub fn getter() -> Result<repak::oodle::OodleDecompress, Box<dyn std::error::Error>> {
+        if library().is_none() {
+            return Err("oo2core_9_win64.dll not found next to the host executable".into());
+        }
+        Ok(decompress)
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pak_builder_new() -> *mut PakBuilder {
-    let builder = PakBuilder::new();
+    let builder = PakBuilder::new().oodle(oodle::getter);
     Box::into_raw(Box::new(builder))
 }
 
@@ -175,8 +263,10 @@ pub unsafe extern "C" fn pak_reader_get(
     ctx: StreamCallbacks,
     buffer: &mut *mut u8,
     length: &mut usize,
+    error_message: &mut *mut c_char,
 ) -> i32 {
     let path = unsafe { CStr::from_ptr(path) }.to_str().unwrap();
+    *error_message = std::ptr::null_mut();
     match reader.get(path, &mut Stream::new(ctx)) {
         Ok(data) => {
             let buf = data.into_boxed_slice();
@@ -185,7 +275,19 @@ pub unsafe extern "C" fn pak_reader_get(
             *length = len;
             0
         }
-        Err(_) => 1,
+        Err(e) => {
+            // Every failure used to collapse to a bare "1" here, with the caller unable to
+            // tell "entry not found" from "found but failed to decompress" from anything
+            // else - real errors (like UnknownCompressionSlot) were being thrown away right
+            // at this boundary, before the C# side even got a chance to lose them again.
+            // CString::new only fails on an embedded NUL, which a normal error Display
+            // string won't contain; fall back to an empty message rather than unwrap and
+            // risk a second panic while already handling the first error.
+            *error_message = CString::new(e.to_string())
+                .unwrap_or_else(|_| CString::new("").unwrap())
+                .into_raw();
+            1
+        }
     }
 }
 

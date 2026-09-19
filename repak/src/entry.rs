@@ -31,6 +31,41 @@ impl Block {
     }
 }
 
+// The zstd frame decoder (used for every other pak) requires a standard frame
+// magic/descriptor. Some licensee pak variants instead store raw/headerless Zstd
+// blocks - ZSTD_compressBlock's output - which only the deprecated "block API" can
+// read back, and that API requires ZSTD_decompressBegin() to initialize context state
+// before ZSTD_decompressBlock() will work (zstd-safe doesn't wrap either function, so
+// this drops to the raw zstd-sys FFI directly). Returns the number of bytes written to
+// `dst`, or Err(()) on any zstd-reported error.
+#[cfg(feature = "compression")]
+fn decompress_raw_zstd_block(dst: &mut [u8], src: &[u8]) -> Result<usize, ()> {
+    unsafe {
+        let dctx = zstd_sys::ZSTD_createDCtx();
+        if dctx.is_null() {
+            return Err(());
+        }
+        let result = (|| {
+            if zstd_sys::ZSTD_isError(zstd_sys::ZSTD_decompressBegin(dctx)) != 0 {
+                return Err(());
+            }
+            let written = zstd_sys::ZSTD_decompressBlock(
+                dctx,
+                dst.as_mut_ptr() as *mut core::ffi::c_void,
+                dst.len(),
+                src.as_ptr() as *const core::ffi::c_void,
+                src.len(),
+            );
+            if zstd_sys::ZSTD_isError(written) != 0 {
+                return Err(());
+            }
+            Ok(written)
+        })();
+        zstd_sys::ZSTD_freeDCtx(dctx);
+        result
+    }
+}
+
 fn align(offset: u64) -> u64 {
     // add alignment (aes block size: 16) then zero out alignment bits
     (offset + 15) & !15
@@ -181,6 +216,13 @@ impl Entry {
                     Compression::Zstd => zstd::stream::encode_all(data.as_ref(), 0)?,
                     Compression::Oodle => {
                         return Err(Error::Other("writing Oodle compression unsupported".into()))
+                    }
+                    // This backport only needed LZ4 *decoding* (to test a real-world legacy
+                    // pak entry that turned out to use it) - writing new LZ4-compressed
+                    // entries was never a goal here, so left unimplemented like Oodle above
+                    // rather than guessing at an encoder API this crate doesn't otherwise use.
+                    Compression::LZ4 => {
+                        return Err(Error::Other("writing LZ4 compression unsupported".into()))
                     }
                 };
 
@@ -504,7 +546,26 @@ impl Entry {
             };
         }
 
-        match self.compression_slot.and_then(|c| compression[c as usize]) {
+        // self.compression_slot is only ever validated against compression's actual length
+        // here, at first use - a legacy (pre-FNameBasedCompression) pak's hardcoded fallback
+        // list (see Footer::read) can be shorter than a slot number an entry legitimately
+        // references, so this must be a checked lookup, not a panicking index: an entry from
+        // the wild that hits this must surface as an ordinary Result error, not abort the
+        // whole process (a panic inside the extern "C" FFI boundary this crate is called
+        // through can't unwind, so Rust aborts instead of returning to the caller at all).
+        let resolved_compression = match self.compression_slot {
+            None => None,
+            Some(c) => *compression
+                .get(c as usize)
+                .ok_or(Error::UnknownCompressionSlot(c, compression.len()))?,
+        };
+        #[cfg(feature = "compression")]
+        let chunk_size = if ranges.len() == 1 {
+            self.uncompressed as usize
+        } else {
+            self.compression_block_size as usize
+        };
+        match resolved_compression {
             None => buf.write_all(&data)?,
             #[cfg(feature = "compression")]
             Some(Compression::Zlib) => decompress!(flate2::read::ZlibDecoder<&[u8]>),
@@ -512,9 +573,32 @@ impl Entry {
             Some(Compression::Gzip) => decompress!(flate2::read::GzDecoder<&[u8]>),
             #[cfg(feature = "compression")]
             Some(Compression::Zstd) => {
-                for range in ranges {
-                    io::copy(&mut zstd::stream::read::Decoder::new(&data[range])?, buf)?;
+                let mut decompressed = vec![0; self.uncompressed as usize];
+                for (decomp_chunk, comp_range) in decompressed.chunks_mut(chunk_size).zip(ranges) {
+                    let comp_data = &data[comp_range];
+                    let mut dst: &mut [u8] = decomp_chunk;
+                    let framed = zstd::stream::read::Decoder::new(comp_data)
+                        .and_then(|mut dec| io::copy(&mut dec, &mut dst));
+                    if framed.is_err() {
+                        // Some licensee pak variants (e.g. Days Gone, unconfirmed) store
+                        // raw/headerless Zstd blocks - no frame magic or descriptor, so the
+                        // standard framed decoder rejects them with "Unknown frame
+                        // descriptor". Each block's uncompressed size is already known from
+                        // the pak index, so the raw block API is the correct fallback.
+                        decompress_raw_zstd_block(decomp_chunk, comp_data)
+                            .map_err(|_| Error::DecompressionFailed(Compression::Zstd))?;
+                    }
                 }
+                buf.write_all(&decompressed)?;
+            }
+            #[cfg(feature = "compression")]
+            Some(Compression::LZ4) => {
+                let mut decompressed = vec![0; self.uncompressed as usize];
+                for (decomp_chunk, comp_range) in decompressed.chunks_mut(chunk_size).zip(ranges) {
+                    lz4_flex::block::decompress_into(&data[comp_range], decomp_chunk)
+                        .map_err(|_| Error::DecompressionFailed(Compression::LZ4))?;
+                }
+                buf.write_all(&decompressed)?;
             }
             #[cfg(feature = "oodle")]
             Some(Compression::Oodle) => {
@@ -578,5 +662,141 @@ mod test {
             .write(&mut out, super::Version::V5, super::EntryLocation::Data)
             .unwrap();
         assert_eq!(&data, &out);
+    }
+
+    /// Regression test: a legacy (pre-FNameBasedCompression) pak version's footer never
+    /// stores compression method names, so `Footer::read` fills in a hardcoded 3-entry
+    /// fallback list (Zlib, Gzip, Oodle) - see footer.rs. A real-world entry can still
+    /// reference compression slot 3 (0-based, a 4th method that fallback list doesn't
+    /// cover), which used to index straight into that 3-element slice and panic. Because
+    /// this call happens behind an `extern "C"` FFI boundary that can't unwind, the panic
+    /// aborted the whole host process instead of returning an error - this must come back
+    /// as an ordinary `Result::Err` instead.
+    #[test]
+    fn read_file_errors_instead_of_panicking_on_out_of_range_compression_slot() {
+        let entry = super::Entry {
+            offset: 0,
+            compressed: 4,
+            uncompressed: 4,
+            compression_slot: Some(3),
+            timestamp: None,
+            hash: Some([0; 20]),
+            blocks: Some(vec![]),
+            flags: 0,
+            compression_block_size: 0,
+        };
+
+        let mut header = vec![];
+        entry
+            .write(&mut header, super::Version::V3, super::EntryLocation::Data)
+            .unwrap();
+        header.extend_from_slice(&[0u8; 4]); // the entry's own (irrelevant-to-this-test) payload bytes
+
+        let compression = [
+            Some(super::super::Compression::Zlib),
+            Some(super::super::Compression::Gzip),
+            Some(super::super::Compression::Oodle),
+        ];
+        let mut out = vec![];
+
+        let result = entry.read_file(
+            &mut std::io::Cursor::new(header),
+            super::Version::V3,
+            &compression,
+            &super::super::Key::None,
+            &super::super::Oodle::None,
+            &mut out,
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::super::Error::UnknownCompressionSlot(3, 3))
+        ));
+    }
+
+    /// Regression test: some licensee pak variants (suspected for Days Gone, unconfirmed)
+    /// store raw/headerless Zstd blocks - ZSTD_compressBlock/ZSTD_decompressBlock, no
+    /// frame magic or descriptor - which the standard frame-based streaming decoder
+    /// rejects with "Unknown frame descriptor" (the exact error real-world testing hit).
+    /// Proves the ZSTD_decompressBlock fallback in `read_file` correctly round-trips
+    /// data compressed the same way, independent of any real pak file - it does not
+    /// prove this is actually what any specific game uses.
+    #[test]
+    fn read_file_falls_back_to_raw_zstd_block_when_frame_decode_fails() {
+        let original =
+            b"the quick brown fox jumps over the lazy dog, again and again and again".to_vec();
+
+        let mut compressed = vec![0u8; original.len() + 128];
+        let written = unsafe {
+            let cctx = zstd_sys::ZSTD_createCCtx();
+            assert!(!cctx.is_null());
+            let begin = zstd_sys::ZSTD_compressBegin(cctx, 0);
+            assert_eq!(zstd_sys::ZSTD_isError(begin), 0);
+            let written = zstd_sys::ZSTD_compressBlock(
+                cctx,
+                compressed.as_mut_ptr() as *mut core::ffi::c_void,
+                compressed.len(),
+                original.as_ptr() as *const core::ffi::c_void,
+                original.len(),
+            );
+            zstd_sys::ZSTD_freeCCtx(cctx);
+            assert_eq!(zstd_sys::ZSTD_isError(written), 0);
+            written
+        };
+        compressed.truncate(written);
+
+        // read_file needs a single Block spanning the whole payload so `ranges` resolves
+        // to one chunk of the correct (uncompressed) size - block start/end are absolute
+        // stream positions of the *compressed* bytes, which aren't known until the header
+        // itself (which embeds the block) has been serialized, hence the two-pass write.
+        let make_entry = |block: Option<super::Block>| super::Entry {
+            offset: 0,
+            compressed: compressed.len() as u64,
+            uncompressed: original.len() as u64,
+            compression_slot: Some(0),
+            timestamp: None,
+            hash: Some([0; 20]),
+            blocks: Some(block.into_iter().collect()),
+            flags: 0,
+            compression_block_size: 0,
+        };
+
+        let mut placeholder_header = vec![];
+        make_entry(Some(super::Block { start: 0, end: 0 }))
+            .write(
+                &mut placeholder_header,
+                super::Version::V3,
+                super::EntryLocation::Data,
+            )
+            .unwrap();
+        let header_len = placeholder_header.len() as u64;
+
+        let entry = make_entry(Some(super::Block {
+            start: header_len,
+            end: header_len + compressed.len() as u64,
+        }));
+
+        let mut header = vec![];
+        entry
+            .write(&mut header, super::Version::V3, super::EntryLocation::Data)
+            .unwrap();
+        assert_eq!(header.len() as u64, header_len);
+        header.extend_from_slice(&compressed);
+
+        let compression = [Some(super::super::Compression::Zstd)];
+        let mut out = vec![];
+
+        entry
+            .read_file(
+                &mut std::io::Cursor::new(header),
+                super::Version::V3,
+                &compression,
+                &super::super::Key::None,
+                &super::super::Oodle::None,
+                &mut out,
+            )
+            .unwrap();
+
+        assert_eq!(out, original);
     }
 }
