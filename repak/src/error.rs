@@ -72,6 +72,9 @@ pub enum Error {
     #[error("entry references compression slot {0}, but this pak's version only declares {1} compression method(s)")]
     UnknownCompressionSlot(u32, usize),
 
+    #[error("directory index references non-encoded entry {0}, but the index holds only {1}")]
+    UnknownNonEncodedEntry(usize, usize),
+
     #[error("used version {used} but pak is version {version}")]
     Version {
         used: super::VersionMajor,

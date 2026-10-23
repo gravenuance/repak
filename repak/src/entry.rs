@@ -10,7 +10,7 @@ pub(crate) enum EntryLocation {
     Index,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Block {
     pub start: u64,
     pub end: u64,
