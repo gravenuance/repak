@@ -458,6 +458,39 @@ mod roundtrip {
     roundtrip_tests!(fname: V8A, V8B, V9, V11);
 }
 
+mod malformed_index {
+    use std::io::Cursor;
+
+    #[test]
+    fn out_of_range_non_encoded_entry_is_an_error() {
+        let mut pak_writer = repak::PakBuilder::new().writer(
+            Cursor::new(vec![]),
+            repak::Version::V11,
+            "../../../".to_string(),
+            Some(0),
+        );
+        pak_writer.write_file("a.txt", false, b"data").unwrap();
+        let mut buf = pak_writer.write_index().unwrap().into_inner();
+
+        // The full directory index stores "a.txt" (length-prefixed, NUL-terminated) followed by
+        // its i32 encoded-entry offset, 0. Rewrite that offset to -1, the first non-encoded
+        // entry, of which the pak has none.
+        let needle = b"\x06\0\0\0a.txt\0\0\0\0\0";
+        let at = buf
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        buf[at + needle.len() - 4..at + needle.len()].copy_from_slice(&(-1i32).to_le_bytes());
+
+        let result = repak::PakBuilder::new()
+            .reader_with_version(&mut Cursor::new(&buf), repak::Version::V11);
+        assert!(
+            matches!(result, Err(repak::Error::UnknownNonEncodedEntry(0, 0))),
+            "got {result:?}"
+        );
+    }
+}
+
 mod marvel_rivals_variant {
     use std::io::Cursor;
 
