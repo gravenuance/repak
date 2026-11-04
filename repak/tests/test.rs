@@ -509,6 +509,63 @@ mod marvel_rivals_variant {
         }
     }
 
+    /// 400 KB that compresses poorly, so it spans four compression blocks whose compressed
+    /// sizes are almost certainly not multiples of 16.
+    fn multi_block_file() -> Vec<u8> {
+        let mut state = 0x2545_f491_u32;
+        (0..400_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state % 7) as u8
+            })
+            .collect()
+    }
+
+    fn round_trip_compressed(compression: repak::Compression) {
+        let data = multi_block_file();
+        let mut pak_writer = repak::PakBuilder::new()
+            .key(key())
+            .variant(repak::PakVariant::MarvelRivals)
+            .compression([compression])
+            .writer(
+                Cursor::new(vec![]),
+                repak::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        pak_writer
+            .write_file("Marvel/Content/big.uasset", true, &data)
+            .unwrap();
+        let buf = pak_writer.write_index().unwrap().into_inner();
+
+        let mut reader = Cursor::new(&buf);
+        let pak_reader = repak::PakBuilder::new()
+            .key(key())
+            .variant(repak::PakVariant::MarvelRivals)
+            .reader(&mut reader)
+            .unwrap();
+        let read = pak_reader
+            .get("Marvel/Content/big.uasset", &mut reader)
+            .unwrap();
+        assert!(
+            read == data,
+            "multi-block {compression:?} entry did not round-trip"
+        );
+    }
+
+    #[test]
+    fn round_trips_a_multi_block_zlib_file() {
+        round_trip_compressed(repak::Compression::Zlib);
+    }
+
+    #[test]
+    #[cfg(feature = "oodle")]
+    fn round_trips_a_multi_block_oodle_file() {
+        round_trip_compressed(repak::Compression::Oodle);
+    }
+
     #[test]
     fn only_a_prefix_of_a_large_file_is_actually_encrypted_on_disk() {
         // A large file's tail must survive on disk byte-for-byte as plaintext - if the whole

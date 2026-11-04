@@ -161,9 +161,14 @@ impl<D: AsRef<[u8]>> PartialEntry<D> {
                     blocks
                         .iter()
                         .map(|block| {
+                            // An encrypted entry's blocks are stored padded to 16 bytes while
+                            // each block records its unpadded size.
                             let start = offset;
-                            offset += block.compressed_size as u64;
-                            let end = offset;
+                            let end = start + block.compressed_size as u64;
+                            offset += match self.encrypted {
+                                true => pad_length(block.compressed_size, 16) as u64,
+                                false => block.compressed_size as u64,
+                            };
                             Block { start, end }
                         })
                         .collect(),
@@ -271,23 +276,29 @@ where
                 blocks: vec![],
             };
         }
-        let PartialEntryData::Blocks { data: buf, .. } = &mut data else {
+        let PartialEntryData::Blocks { data: buf, blocks } = &mut data else {
             unreachable!()
         };
-        let plan = ctx
+        let encrypts = ctx
             .variant
-            .encryption_plan(ctx.mount_point, ctx.path, buf.len());
-        if plan.final_len > buf.len() {
-            buf.resize(plan.final_len, 0);
-        }
-        if plan.encrypted_len > 0 {
+            .encryption_plan(ctx.mount_point, ctx.path, buf.len())
+            .encrypted_len
+            > 0;
+        if encrypts {
+            *buf = pad_blocks_for_encryption(buf, blocks);
+            let plan = ctx
+                .variant
+                .encryption_plan(ctx.mount_point, ctx.path, buf.len());
             encrypt(ctx.variant, key, &mut buf[..plan.encrypted_len]);
             encrypted = true;
-        }
-        // An uncompressed entry keeps its unpadded size, as the game's paks record it; the
-        // padding sits on disk before the next entry.
-        if compression.is_some() {
-            compressed_size = buf.len() as u64;
+            // An uncompressed entry keeps its unpadded size, as the game's paks record it; the
+            // padding sits on disk before the next entry.
+            if compression.is_some() {
+                compressed_size = buf.len() as u64;
+            }
+            // The game hashes the entry's recorded size of the bytes as stored
+            hasher = Sha1::new();
+            hasher.update(&buf[..compressed_size as usize]);
         }
     }
 
@@ -300,6 +311,28 @@ where
         encrypted,
         hash: Hash(hasher.finalize().into()),
     })
+}
+
+/// Pads each compressed block (or an uncompressed buffer as a whole) to the AES block size,
+/// as an encrypted entry is stored: the reader steps over each block's padded length. The
+/// padding repeats the entry's first bytes, as the game's paks fill it.
+#[cfg(feature = "encryption")]
+fn pad_blocks_for_encryption(buf: &[u8], blocks: &[PartialBlock]) -> Vec<u8> {
+    let sizes: Vec<usize> = if blocks.is_empty() {
+        vec![buf.len()]
+    } else {
+        blocks.iter().map(|b| b.compressed_size).collect()
+    };
+    let filler = &buf[..sizes[0]];
+    let mut padded = Vec::with_capacity(buf.len() + 15 * sizes.len());
+    let mut pos = 0;
+    for size in sizes {
+        padded.extend_from_slice(&buf[pos..pos + size]);
+        pos += size;
+        let pad = pad_length(padded.len(), 16) - padded.len();
+        padded.extend(filler.iter().cycle().take(pad));
+    }
+    padded
 }
 
 #[cfg(feature = "compression")]
@@ -336,4 +369,108 @@ fn compress(compression: Compression, data: &[u8]) -> Result<Vec<u8>> {
     };
 
     Ok(compressed)
+}
+
+#[cfg(all(test, feature = "compression", feature = "encryption"))]
+mod test {
+    use super::*;
+    use aes::cipher::KeyInit;
+    use sha1::{Digest, Sha1};
+
+    const BLOCK: usize = 0x3e << 11;
+
+    fn context(key: &super::super::Key) -> EncryptionContext<'_> {
+        EncryptionContext {
+            key,
+            variant: PakVariant::MarvelRivals,
+            mount_point: "../../../",
+            path: "Marvel/Content/big.uasset",
+        }
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state % 7) as u8
+            })
+            .collect()
+    }
+
+    fn zlib(chunk: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(chunk).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// The game's paks (pakchunk0, Patch_-Windows_1.1.3984769_P, pakchunkLocres) store every
+    /// block of an encrypted compressed entry padded to 16 bytes, the padding a copy of the
+    /// entry's first plaintext bytes; the index records each block's unpadded size, block
+    /// starts advance by the padded size, the entry's compressed size is the padded total,
+    /// and the hash covers the bytes as stored.
+    #[test]
+    fn marvel_rivals_pads_each_compressed_block_as_the_game_stores_it() {
+        let data = noise(300_000);
+        let key = super::super::Key::Some(aes::Aes256::new_from_slice(&[7; 32]).unwrap());
+        let partial =
+            build_partial_entry(&[Compression::Zlib], context(&key), Version::V11, &data[..])
+                .unwrap();
+        let entry = partial.build_entry(Version::V11, &mut vec![], 0).unwrap();
+        let mut on_disk = vec![];
+        partial.write_data(&mut on_disk).unwrap();
+
+        let first_block = zlib(&data[..BLOCK]);
+        let sizes: Vec<u64> = data.chunks(BLOCK).map(|c| zlib(c).len() as u64).collect();
+        assert!(
+            sizes.iter().any(|s| s % 16 != 0),
+            "test needs an unaligned block"
+        );
+        let blocks = entry.blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), sizes.len());
+        let header = Entry::get_serialized_size(Version::V11, entry.compression_slot, 3);
+        let mut start = header;
+        for (i, (block, size)) in blocks.iter().zip(&sizes).enumerate() {
+            assert_eq!(block.start, start, "block {i} start");
+            assert_eq!(block.end - block.start, *size, "block {i} recorded size");
+            let pad = ((16 - size % 16) % 16) as usize;
+            let pad_at = (block.end - header) as usize;
+            assert_eq!(
+                &on_disk[pad_at..pad_at + pad],
+                &first_block[..pad],
+                "block {i} padding"
+            );
+            start += size + pad as u64;
+        }
+        assert_eq!(entry.compressed, start - header);
+        assert_eq!(on_disk.len() as u64, entry.compressed);
+        assert_eq!(
+            entry.hash.unwrap().0,
+            <[u8; 20]>::from(Sha1::digest(&on_disk))
+        );
+    }
+
+    /// The game's uncompressed encrypted entries record the unpadded size, pad with a copy
+    /// of the file's first bytes, and hash the recorded size of the bytes as stored.
+    #[test]
+    fn marvel_rivals_pads_an_uncompressed_entry_as_the_game_stores_it() {
+        let data = noise(5000);
+        let key = super::super::Key::Some(aes::Aes256::new_from_slice(&[7; 32]).unwrap());
+        let partial = build_partial_entry(&[], context(&key), Version::V11, &data[..]).unwrap();
+        let entry = partial.build_entry(Version::V11, &mut vec![], 0).unwrap();
+        let mut on_disk = vec![];
+        partial.write_data(&mut on_disk).unwrap();
+
+        assert_eq!(entry.compressed, 5000);
+        assert_eq!(on_disk.len(), 5008);
+        // the encrypted prefix is at most 4096 bytes, so the tail is stored as plaintext
+        assert_eq!(&on_disk[4096..5000], &data[4096..]);
+        assert_eq!(&on_disk[5000..], &data[..8]);
+        assert_eq!(
+            entry.hash.unwrap().0,
+            <[u8; 20]>::from(Sha1::digest(&on_disk[..5000]))
+        );
+    }
 }
