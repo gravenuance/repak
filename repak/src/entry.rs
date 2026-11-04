@@ -538,21 +538,15 @@ mod test {
         assert_eq!(&data, &out);
     }
 
-    /// Regression test: a legacy (pre-FNameBasedCompression) pak version's footer never
-    /// stores compression method names, so `Footer::read` fills in a hardcoded 3-entry
-    /// fallback list (Zlib, Gzip, Oodle) - see footer.rs. A real-world entry can still
-    /// reference compression slot 3 (0-based, a 4th method that fallback list doesn't
-    /// cover), which used to index straight into that 3-element slice and panic. Because
-    /// this call happens behind an `extern "C"` FFI boundary that can't unwind, the panic
-    /// aborted the whole host process instead of returning an error - this must come back
-    /// as an ordinary `Result::Err` instead.
+    /// A slot past the pak's compression list is an error, not a panic: behind the C# FFI
+    /// boundary a panic aborts the host process.
     #[test]
     fn read_file_errors_instead_of_panicking_on_out_of_range_compression_slot() {
         let entry = super::Entry {
             offset: 0,
             compressed: 4,
             uncompressed: 4,
-            compression_slot: Some(3),
+            compression_slot: Some(4),
             timestamp: None,
             hash: Some(super::super::Hash([0; 20])),
             blocks: Some(vec![]),
@@ -569,6 +563,7 @@ mod test {
         let compression = [
             Some(super::super::Compression::Zlib),
             Some(super::super::Compression::Gzip),
+            None,
             Some(super::super::Compression::Oodle),
         ];
         let ctx = super::EncryptionContext {
@@ -589,7 +584,7 @@ mod test {
 
         assert!(matches!(
             result,
-            Err(super::super::Error::UnknownCompressionSlot(3, 3))
+            Err(super::super::Error::UnknownCompressionSlot(4, 4))
         ));
     }
 

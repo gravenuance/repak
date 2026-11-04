@@ -7,6 +7,16 @@ use super::{ext::ReadExt, Compression, Version, VersionMajor};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use std::str::FromStr;
 
+/// Compression slots of paks older than FNameBasedCompression, which store no method names.
+/// There the entry's compression field is an `ECompressionFlags` value (0x01 ZLIB, 0x02 GZIP,
+/// 0x04 COMPRESS_Custom), and the entry's slot is that value minus one. 0x03 is not a codec.
+pub(crate) const LEGACY_COMPRESSION: [Option<Compression>; 4] = [
+    Some(Compression::Zlib),
+    Some(Compression::Gzip),
+    None,
+    Some(Compression::Oodle),
+];
+
 #[derive(Debug)]
 pub struct Footer {
     pub encryption_uuid: Option<u128>,
@@ -54,20 +64,7 @@ impl Footer {
                 )
             }
             if version.version_major() < VersionMajor::FNameBasedCompression {
-                compression.push(Some(Compression::Zlib));
-                compression.push(Some(Compression::Gzip));
-                compression.push(Some(Compression::Oodle));
-                // Slot 3: Zstd is the leading candidate (it's slot 3 in both this crate's
-                // own Compression enum and UAssetAPI's independently-written
-                // PakCompression). The standard framed Zstd decoder cleanly rejected a
-                // real Days Gone V3 pak entry ("Unknown frame descriptor"), but that only
-                // rules out the *framed* form - entry.rs's Zstd arm now also falls back to
-                // ZSTD_decompressBlock for headerless raw blocks, which hasn't been tested
-                // against real data yet. LZ4 was tried here too and also cleanly rejected
-                // ("LZ4 decompression failed"), so it's been moved out of this slot back
-                // to unused-for-now rather than sitting where Zstd's raw-block form has a
-                // real, untested hypothesis.
-                compression.push(Some(Compression::Zstd));
+                compression.extend(LEGACY_COMPRESSION);
             }
             compression
         };
@@ -133,14 +130,8 @@ mod test {
     use super::{Footer, Hash};
     use crate::{Compression, Version, VersionMajor};
 
-    /// Regression test: a legacy (pre-FNameBasedCompression) pak version's footer never
-    /// stores compression method names on disk, so `Footer::read` fills in a hardcoded
-    /// fallback list instead of reading one. This list must have exactly as many entries
-    /// as any real-world entry's compression slot can reference - see entry.rs's own
-    /// regression test for what happens when it doesn't (a slot 3 entry from a real V3
-    /// pak used to panic on a 3-element list; the 4th entry, Zstd, was missing).
     #[test]
-    fn read_fills_in_four_hardcoded_legacy_compression_methods() {
+    fn read_fills_in_legacy_compression_by_ecompressionflags() {
         let footer = Footer {
             encryption_uuid: None,
             encrypted: false,
@@ -158,13 +149,14 @@ mod test {
         footer.write(&mut buf).unwrap();
         let read_back = Footer::read(&mut std::io::Cursor::new(buf), Version::V3).unwrap();
 
+        // Indexed by ECompressionFlags - 1: ZLIB 0x01, GZIP 0x02, COMPRESS_Custom 0x04
         assert_eq!(
             read_back.compression,
             vec![
                 Some(Compression::Zlib),
                 Some(Compression::Gzip),
+                None,
                 Some(Compression::Oodle),
-                Some(Compression::Zstd),
             ]
         );
     }
