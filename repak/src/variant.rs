@@ -37,9 +37,7 @@ const MARVEL_RIVALS_INDEX_TRAILER: [u8; 35] = [
 /// Salt mixed into the path hash ahead of the lowercased path itself.
 const MARVEL_RIVALS_ENCRYPT_LIMIT_SALT: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
 
-/// How many leading bytes of a buffer get encrypted, and what the buffer's final length ends
-/// up being. `final_len` only ever differs from the buffer's starting length when `can_grow`
-/// is true and padding was needed - see `PakVariant::encryption_plan`.
+/// How many leading bytes of a buffer get encrypted, and the buffer's length on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EncryptionPlan {
     pub(crate) final_len: usize,
@@ -47,46 +45,31 @@ pub(crate) struct EncryptionPlan {
 }
 
 impl PakVariant {
-    /// Decides how many leading bytes of a `data_len`-byte buffer get encrypted, and whether
-    /// the buffer needs to grow first to hold that encryption.
+    /// Decides how many leading bytes of a `data_len`-byte buffer get encrypted, and its length
+    /// on disk. Write and read both call it with the entry's recorded compressed size, so they
+    /// agree on where the ciphertext ends.
     ///
-    /// Write and read call this with the same two questions answered the same way -
-    /// `data_len` (the buffer's length *before* writing, or the entry's recorded compressed
-    /// size when reading it back - the two are identical unless growth happened) and
-    /// `can_grow` (whether the entry is compressed, so its on-disk size is already stored
-    /// independently of its uncompressed size) - which is what keeps them from disagreeing
-    /// about where the ciphertext ends. An *un*compressed entry's encoded index has no field
-    /// for a compressed size that differs from the uncompressed one at all (the reader just
-    /// assumes they're equal), so growing such a buffer via padding would silently corrupt
-    /// the round trip; the encrypted region is floored to the nearest full AES block instead,
-    /// leaving a short remainder as plaintext (or nothing encrypted at all, for a file under
-    /// 16 bytes).
+    /// An encrypted entry's data is stored padded to 16 bytes and the encrypted prefix is capped
+    /// at that padded length, so a file shorter than its prefix is encrypted whole, as the game's
+    /// own paks store it. An uncompressed entry records its unpadded size: readers read the
+    /// aligned length of an encrypted entry anyway.
     pub(crate) fn encryption_plan(
         &self,
         mount_point: &str,
         path: &str,
         data_len: usize,
-        can_grow: bool,
     ) -> EncryptionPlan {
-        let requested = self
-            .raw_encrypted_prefix_len(mount_point, path)
-            .min(data_len);
-        if requested == 0 || requested < data_len {
-            EncryptionPlan {
+        let prefix = self.raw_encrypted_prefix_len(mount_point, path);
+        if prefix == 0 || data_len == 0 {
+            return EncryptionPlan {
                 final_len: data_len,
-                encrypted_len: requested,
-            }
-        } else if can_grow {
-            let final_len = crate::data::pad_length(data_len, 16);
-            EncryptionPlan {
-                final_len,
-                encrypted_len: final_len,
-            }
-        } else {
-            EncryptionPlan {
-                final_len: data_len,
-                encrypted_len: data_len - (data_len % 16),
-            }
+                encrypted_len: 0,
+            };
+        }
+        let final_len = crate::data::pad_length(data_len, 16);
+        EncryptionPlan {
+            final_len,
+            encrypted_len: prefix.min(final_len),
         }
     }
 
@@ -115,13 +98,12 @@ impl PakVariant {
         mount_point: &str,
         path: &str,
         compressed_len: usize,
-        can_grow: bool,
         aligned_len: usize,
     ) -> usize {
         match self {
             PakVariant::Standard => aligned_len,
             PakVariant::MarvelRivals => self
-                .encryption_plan(mount_point, path, compressed_len, can_grow)
+                .encryption_plan(mount_point, path, compressed_len)
                 .encrypted_len
                 .min(aligned_len),
         }
@@ -206,7 +188,7 @@ mod test {
 
     #[test]
     fn test_standard_variant_never_encrypts_file_data() {
-        let plan = PakVariant::Standard.encryption_plan("../../../A/", "b.uasset", 12345, true);
+        let plan = PakVariant::Standard.encryption_plan("../../../A/", "b.uasset", 12345);
         assert_eq!(plan.encrypted_len, 0);
         assert_eq!(plan.final_len, 12345);
         assert!(!PakVariant::Standard.reverse_word_order());
@@ -215,15 +197,18 @@ mod test {
 
     #[test]
     #[cfg(feature = "encryption")]
-    fn test_marvel_rivals_large_compressed_file_encrypts_a_block_aligned_prefix_without_growing() {
+    fn test_marvel_rivals_large_file_encrypts_a_block_aligned_prefix_and_pads_to_16() {
         let plan = PakVariant::MarvelRivals.encryption_plan(
             "../../../MyGame/Content",
             "Foo/Bar.uasset",
-            1_000_000,
-            true,
+            1_000_001,
         );
-        assert_eq!(plan.final_len, 1_000_000, "a large file is never padded");
-        assert_eq!(plan.encrypted_len % 16, 0, "prefix must be AES-block-aligned");
+        assert_eq!(plan.final_len, 1_000_016);
+        assert_eq!(
+            plan.encrypted_len % 16,
+            0,
+            "prefix must be AES-block-aligned"
+        );
         // ((seed % 0x3D) * 63 + 319) ranges 319..=4099 before rounding down to a multiple of
         // 64, giving 256..=4096.
         assert!(
@@ -237,36 +222,34 @@ mod test {
             PakVariant::MarvelRivals.encryption_plan(
                 "../../../MyGame/Content",
                 "Foo/Bar.uasset",
-                1_000_000,
-                true,
+                1_000_001,
             )
         );
     }
 
     #[test]
     #[cfg(feature = "encryption")]
-    fn test_marvel_rivals_small_compressed_file_is_padded_and_fully_encrypted() {
-        // A compressed entry's compressed size is already independent of its uncompressed
-        // size in the format, so padding to grow it is safe.
-        let plan = PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", 10, true);
-        assert_eq!(plan.final_len % 16, 0);
-        assert!(plan.final_len >= 10);
-        assert_eq!(plan.encrypted_len, plan.final_len, "the whole padded file is encrypted");
-    }
-
-    #[test]
-    #[cfg(feature = "encryption")]
-    fn test_marvel_rivals_small_uncompressed_file_is_never_padded() {
-        // An uncompressed entry has no way to record a compressed size that differs from its
-        // uncompressed size, so growth is not allowed - the buffer's length must come back
-        // out unchanged even though the file is smaller than the hash-derived limit.
-        let plan = PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", 10, false);
-        assert_eq!(plan.final_len, 10, "an uncompressed entry must never grow");
-        assert_eq!(plan.encrypted_len, 0, "10 bytes is under one AES block");
-
-        let plan14 = PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", 14, false);
-        assert_eq!(plan14.final_len, 14);
-        assert_eq!(plan14.encrypted_len, 0, "14 bytes is still under one AES block");
+    fn test_marvel_rivals_small_file_is_padded_and_encrypted_whole() {
+        // The game's own paks store a file shorter than its prefix this way
+        for (len, padded) in [(10, 16), (14, 16), (61, 64)] {
+            let plan = PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", len);
+            assert_eq!(
+                plan,
+                EncryptionPlan {
+                    final_len: padded,
+                    encrypted_len: padded
+                },
+                "{len}"
+            );
+        }
+        let empty = PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", 0);
+        assert_eq!(
+            empty,
+            EncryptionPlan {
+                final_len: 0,
+                encrypted_len: 0
+            }
+        );
     }
 
     #[test]
@@ -275,27 +258,18 @@ mod test {
         // real Unreal Engine pak encrypts a whole file - unrelated to whether *this* crate's
         // own writer ever proactively encrypts file data for the standard variant.
         assert_eq!(
-            PakVariant::Standard.read_encrypted_len("../../../A/", "b.uasset", 100, true, 112),
+            PakVariant::Standard.read_encrypted_len("../../../A/", "b.uasset", 100, 112),
             112
         );
     }
 
     #[test]
     #[cfg(feature = "encryption")]
-    fn test_marvel_rivals_read_encrypted_len_matches_write_side_when_uncompressed_and_unchanged() {
-        // Reading back with the exact same (unchanged, since uncompressed never grows) length
-        // written must reproduce the same encrypted-byte count.
-        let write_plan =
-            PakVariant::MarvelRivals.encryption_plan("../../../A/", "b.uasset", 1_000_000, false);
+    fn test_marvel_rivals_read_encrypted_len_uses_the_recorded_unpadded_size() {
+        // An uncompressed entry records 61 bytes; the reader reads 64 and decrypts all of them
         assert_eq!(
-            PakVariant::MarvelRivals.read_encrypted_len(
-                "../../../A/",
-                "b.uasset",
-                write_plan.final_len,
-                false,
-                write_plan.final_len,
-            ),
-            write_plan.encrypted_len
+            PakVariant::MarvelRivals.read_encrypted_len("../../../A/", "b.uasset", 61, 64),
+            64
         );
     }
 }

@@ -395,12 +395,10 @@ impl Entry {
                 // actually ciphertext - the whole thing for a standard, fully-encrypted file,
                 // or a hash-derived prefix for a game-specific variant. Anything beyond that
                 // point was never touched by the cipher.
-                let can_grow = self.compression_slot.is_some() || version < Version::V10;
                 let prefix_len = ctx.variant.read_encrypted_len(
                     ctx.mount_point,
                     ctx.path,
                     self.compressed as usize,
-                    can_grow,
                     data.len(),
                 );
                 crate::data::decrypt(ctx.variant, ctx.key, &mut data[..prefix_len])?;
@@ -680,5 +678,52 @@ mod test {
             .unwrap();
 
         assert_eq!(out, original);
+    }
+
+    /// Marvel Rivals' own paks store a file shorter than its encrypted prefix padded to 16 bytes
+    /// and encrypted whole, with the unpadded size in the entry.
+    #[test]
+    #[cfg(feature = "encryption")]
+    fn read_file_decrypts_a_small_uncompressed_entry_stored_as_marvel_rivals_stores_it() {
+        use aes::cipher::KeyInit;
+        let plaintext = b"[/Script/Engine.InputSettings]\r\nbUseMouseForTouch=False\r\n";
+        let key = aes::Aes256::new_from_slice(&[7; 32]).unwrap();
+        let entry = super::Entry {
+            offset: 0,
+            compressed: plaintext.len() as u64,
+            uncompressed: plaintext.len() as u64,
+            compression_slot: None,
+            timestamp: None,
+            hash: Some(super::super::Hash([0; 20])),
+            blocks: None,
+            flags: 1,
+            compression_block_size: 0,
+        };
+        let mut data = vec![];
+        entry
+            .write(&mut data, super::Version::V11, super::EntryLocation::Data)
+            .unwrap();
+        let mut payload = plaintext.to_vec();
+        payload.resize(64, 0);
+        crate::data::encrypt(super::super::PakVariant::MarvelRivals, &key, &mut payload);
+        data.extend(payload);
+
+        let ctx = super::EncryptionContext {
+            key: &super::super::Key::Some(key),
+            variant: super::super::PakVariant::MarvelRivals,
+            mount_point: "../../../",
+            path: "Engine/Config/Test.ini",
+        };
+        let mut out = vec![];
+        entry
+            .read_file(
+                &mut std::io::Cursor::new(data),
+                super::Version::V11,
+                &[],
+                ctx,
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(out, plaintext);
     }
 }

@@ -274,16 +274,9 @@ where
         let PartialEntryData::Blocks { data: buf, .. } = &mut data else {
             unreachable!()
         };
-        // V10+'s *encoded* index entries (see `Entry::write_encoded`) have no field for a
-        // compressed size that differs from the uncompressed one at all when there's no
-        // compression - the reader just assumes they're equal - so growing an uncompressed
-        // entry via padding to fully encrypt a small file is only safe below V10, where
-        // `Entry::write` always stores both sizes independently; `encryption_plan` floors to
-        // a full-block boundary instead when it can't grow.
-        let can_grow = compression.is_some() || version < Version::V10;
         let plan = ctx
             .variant
-            .encryption_plan(ctx.mount_point, ctx.path, buf.len(), can_grow);
+            .encryption_plan(ctx.mount_point, ctx.path, buf.len());
         if plan.final_len > buf.len() {
             buf.resize(plan.final_len, 0);
         }
@@ -291,7 +284,11 @@ where
             encrypt(ctx.variant, key, &mut buf[..plan.encrypted_len]);
             encrypted = true;
         }
-        compressed_size = buf.len() as u64;
+        // An uncompressed entry keeps its unpadded size, as the game's paks record it; the
+        // padding sits on disk before the next entry.
+        if compression.is_some() {
+            compressed_size = buf.len() as u64;
+        }
     }
 
     Ok(PartialEntry {

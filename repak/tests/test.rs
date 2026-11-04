@@ -552,6 +552,17 @@ mod marvel_rivals_variant {
     }
 
     #[test]
+    fn a_small_uncompressed_file_is_padded_and_encrypted_whole() {
+        // The game's own paks pad a file shorter than its prefix to 16 bytes and encrypt all of it
+        let small = b"Hello, Marvel!";
+        let buf = build_pak(&[("small.txt", small)]);
+        assert!(
+            !buf.windows(small.len()).any(|w| w == small),
+            "expected no plaintext of the small file in the pak"
+        );
+    }
+
+    #[test]
     fn writing_without_a_variant_is_unaffected() {
         // The whole point of the variant mechanism: not opting in must produce exactly what
         // repak already produced before this feature existed - a key alone must not encrypt
