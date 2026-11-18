@@ -238,6 +238,20 @@ fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::E
     Ok(())
 }
 
+/// Feeds written bytes to a SHA-256 hasher (`sha2` 0.11 no longer implements `io::Write`).
+struct HashWriter(sha2::Sha256);
+
+impl io::Write for HashWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        sha2::Digest::update(&mut self.0, buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(), repak::Error> {
     let mut builder = repak::PakBuilder::new();
     if let Some(aes_key) = aes_key {
@@ -272,13 +286,13 @@ fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(),
         |(hashes, file), ((_full_path, path), stripped)| -> Result<(), repak::Error> {
             use sha2::Digest;
 
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = HashWriter(sha2::Sha256::new());
             pak.read_file(
                 path,
                 &mut BufReader::new(file.as_ref().unwrap()),
                 &mut hasher,
             )?;
-            let hash = hasher.finalize();
+            let hash = hasher.0.finalize();
             hashes
                 .lock()
                 .unwrap()

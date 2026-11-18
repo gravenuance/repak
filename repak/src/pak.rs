@@ -157,9 +157,9 @@ impl Index {
 #[cfg(feature = "encryption")]
 fn decrypt(key: &super::Key, bytes: &mut [u8]) -> Result<(), super::Error> {
     if let super::Key::Some(key) = key {
-        use aes::cipher::BlockDecrypt;
+        use aes::cipher::BlockCipherDecrypt;
         for chunk in bytes.chunks_mut(16) {
-            key.decrypt_block(aes::Block::from_mut_slice(chunk))
+            key.decrypt_block(as_block(chunk))
         }
         Ok(())
     } else {
@@ -704,10 +704,18 @@ fn pad_zeros_to_alignment(v: &mut Vec<u8>, alignment: usize) {
 
 #[cfg(feature = "encryption")]
 fn encrypt(key: aes::Aes256, bytes: &mut [u8]) {
-    use aes::cipher::BlockEncrypt;
+    use aes::cipher::BlockCipherEncrypt;
     for chunk in bytes.chunks_mut(16) {
-        key.encrypt_block(aes::Block::from_mut_slice(chunk))
+        key.encrypt_block(as_block(chunk))
     }
+}
+
+/// Views a 16-byte chunk as an AES block.
+#[cfg(feature = "encryption")]
+pub(crate) fn as_block(chunk: &mut [u8]) -> &mut aes::Block {
+    chunk
+        .try_into()
+        .expect("callers pass whole 16-byte AES blocks")
 }
 
 #[cfg(test)]

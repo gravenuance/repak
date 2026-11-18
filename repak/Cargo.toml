@@ -19,15 +19,15 @@ encryption = ["dep:aes"]
 [dependencies]
 byteorder = "1.5"
 aes = { workspace = true, optional = true }
-flate2 = { version = "1.0", optional = true }
-zstd = { version = "0.13", optional = true }
+flate2 = { version = "1.1", optional = true }
+zstd = { version = "0.14", optional = true }
 zstd-sys = { version = "2", optional = true, features = ["experimental"] }
-lz4_flex = { version = "0.12.0", optional = true }
+lz4_flex = { version = "0.14.2", optional = true }
 oodle_loader = { path = "../oodle_loader", optional = true}
-thiserror = "1.0"
+thiserror = "2.0"
 sha1 = { workspace = true }
 strum = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
-paste = "1.0.15"
+pastey = "0.2.3"

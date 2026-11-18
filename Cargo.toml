@@ -11,10 +11,10 @@ edition = "2021"
 keywords = ["unreal-engine", "pak", "unrealpak"]
 
 [workspace.dependencies]
-aes = "0.8.4"
-base64 = "0.22.1"
-strum = { version = "0.26", features = ["derive"] }
-sha1 = "0.10"
+aes = "0.9.4"
+base64 = "0.23.1"
+strum = { version = "0.28", features = ["derive"] }
+sha1 = "0.11"
 hex = "0.4"
 
 # Config for 'cargo dist'

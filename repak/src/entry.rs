@@ -287,7 +287,7 @@ impl Entry {
         let timestamp = (ver == VersionMajor::Initial).then_try(|| reader.read_u64::<LE>())?;
         let hash = Some(reader.read_guid()?);
         let blocks = (ver >= VersionMajor::CompressionEncryption && compression.is_some())
-            .then_try(|| reader.read_array(Block::read))?;
+            .then_try(|| ReadExt::read_array(reader, Block::read))?;
         let flags = (ver >= VersionMajor::CompressionEncryption)
             .then_try(|| reader.read_u8())?
             .unwrap_or(0);
@@ -510,9 +510,9 @@ impl Entry {
                 let super::Key::Some(key) = key else {
                     return Err(super::Error::Encrypted);
                 };
-                use aes::cipher::BlockDecrypt;
+                use aes::cipher::BlockCipherDecrypt;
                 for block in data.chunks_mut(16) {
-                    key.decrypt_block(aes::Block::from_mut_slice(block))
+                    key.decrypt_block(crate::pak::as_block(block))
                 }
                 data.truncate(self.compressed as usize);
             }

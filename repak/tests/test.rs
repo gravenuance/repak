@@ -1,6 +1,6 @@
 #![cfg(feature = "default")]
 use byteorder::{ReadBytesExt, WriteBytesExt};
-use paste::paste;
+use pastey::paste;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 /// A reader that tracks how many times bytes in the inner reader been read. Useful to check read coverage.

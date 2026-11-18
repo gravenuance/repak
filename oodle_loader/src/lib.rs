@@ -6,20 +6,20 @@ type OodleDecompress = fn(comp_buf: &[u8], raw_buf: &mut [u8]) -> i32;
 
 #[allow(non_camel_case_types)]
 type OodleLZ_Decompress = unsafe extern "win64" fn(
-    compBuf: *const u8,
-    compBufSize: usize,
-    rawBuf: *mut u8,
-    rawLen: usize,
-    fuzzSafe: u32,
-    checkCRC: u32,
+    comp_buf: *const u8,
+    comp_buf_size: usize,
+    raw_buf: *mut u8,
+    raw_len: usize,
+    fuzz_safe: u32,
+    check_crc: u32,
     verbosity: u32,
-    decBufBase: u64,
-    decBufSize: usize,
-    fpCallback: u64,
-    callbackUserData: u64,
-    decoderMemory: *mut u8,
-    decoderMemorySize: usize,
-    threadPhase: u32,
+    dec_buf_base: u64,
+    dec_buf_size: usize,
+    fp_callback: u64,
+    callback_user_data: u64,
+    decoder_memory: *mut u8,
+    decoder_memory_size: usize,
+    thread_phase: u32,
 ) -> i32;
 
 pub fn decompress() -> Result<OodleDecompress, Box<dyn std::error::Error>> {
@@ -59,11 +59,10 @@ fn fetch_oodle() -> Result<std::path::PathBuf> {
     let oodle_path = std::env::current_exe()?.with_file_name(OODLE_DLL_NAME);
 
     if !oodle_path.exists() {
-        let mut compressed = vec![];
-        ureq::get("https://origin.warframe.com/origin/50F7040A/index.txt.lzma")
+        let compressed = ureq::get("https://origin.warframe.com/origin/50F7040A/index.txt.lzma")
             .call()?
-            .into_reader()
-            .read_to_end(&mut compressed)?;
+            .into_body()
+            .read_to_vec()?;
 
         let mut decompressed = vec![];
         lzma_rs::lzma_decompress(&mut std::io::Cursor::new(compressed), &mut decompressed).unwrap();
@@ -74,11 +73,10 @@ fn fetch_oodle() -> Result<std::path::PathBuf> {
             .with_context(|| format!("{OODLE_DLL_NAME} not found in index"))?;
         let path = line.split_once(',').context("failed to parse index")?.0;
 
-        let mut compressed = vec![];
-        ureq::get(&format!("https://content.warframe.com{path}"))
+        let compressed = ureq::get(&format!("https://content.warframe.com{path}"))
             .call()?
-            .into_reader()
-            .read_to_end(&mut compressed)?;
+            .into_body()
+            .read_to_vec()?;
 
         let mut decompressed = vec![];
         lzma_rs::lzma_decompress(&mut std::io::Cursor::new(compressed), &mut decompressed).unwrap();
