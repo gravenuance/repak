@@ -163,10 +163,10 @@ mod test {
         assert_eq!(
             read_back.compression,
             vec![
-                Some(Compression::Zlib), // ECompressionFlags 0x01
-                Some(Compression::Gzip), // 0x02
-                None,                    // 0x03 (ZLIB|GZIP) is not a real codec
-                Some(Compression::Oodle) // 0x04 COMPRESS_Custom - Oodle in practice
+                Some(Compression::Zlib),  // ECompressionFlags 0x01
+                Some(Compression::Gzip),  // 0x02
+                None,                     // 0x03 (ZLIB|GZIP) is not a real codec
+                Some(Compression::Oodle)  // 0x04 COMPRESS_Custom - Oodle in practice
             ]
         );
     }

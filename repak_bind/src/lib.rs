@@ -123,9 +123,7 @@ mod oodle {
             .get_or_init(|| {
                 candidate_paths().into_iter().find_map(|p| unsafe {
                     let lib = libloading::Library::new(&p).ok()?;
-                    let sym = *lib
-                        .get::<OodleLZDecompress>(b"OodleLZ_Decompress\0")
-                        .ok()?;
+                    let sym = *lib.get::<OodleLZDecompress>(b"OodleLZ_Decompress\0").ok()?;
                     Some((lib, sym))
                 })
             })
@@ -221,9 +219,7 @@ pub unsafe extern "C" fn pak_builder_reader(
     let mut stream = Stream::new(ctx);
     match Box::from_raw(builder).reader(&mut stream) {
         Ok(reader) => Box::into_raw(Box::new(reader)),
-        Err(_) => {
-            std::ptr::null_mut()
-        }
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
