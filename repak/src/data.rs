@@ -16,14 +16,22 @@ pub(crate) fn pad_zeros_to_alignment(v: &mut Vec<u8>, alignment: usize) {
     v.resize(pad_length(v.len(), alignment), 0);
 }
 
+/// Views a 16-byte slice as an AES block.
+#[cfg(feature = "encryption")]
+fn as_block(chunk: &mut [u8]) -> &mut aes::Block {
+    chunk
+        .try_into()
+        .expect("callers pass whole 16-byte AES blocks")
+}
+
 /// AES over one 16-byte block, honouring the variant's word-order convention.
 #[cfg(feature = "encryption")]
 fn encrypt_block(variant: PakVariant, key: &aes::Aes256, chunk: &mut [u8]) {
-    use aes::cipher::BlockEncrypt;
+    use aes::cipher::BlockCipherEncrypt;
     if variant.reverse_word_order() {
         chunk.chunks_mut(4).for_each(|c| c.reverse());
     }
-    key.encrypt_block(aes::Block::from_mut_slice(chunk));
+    key.encrypt_block(as_block(chunk));
     if variant.reverse_word_order() {
         chunk.chunks_mut(4).for_each(|c| c.reverse());
     }
@@ -37,19 +45,15 @@ pub(crate) fn encrypt(variant: PakVariant, key: &aes::Aes256, bytes: &mut [u8]) 
 }
 
 #[cfg(feature = "encryption")]
-pub(crate) fn decrypt(
-    variant: PakVariant,
-    key: &super::Key,
-    bytes: &mut [u8],
-) -> Result<()> {
+pub(crate) fn decrypt(variant: PakVariant, key: &super::Key, bytes: &mut [u8]) -> Result<()> {
     if let super::Key::Some(key) = key {
-        use aes::cipher::BlockDecrypt;
+        use aes::cipher::BlockCipherDecrypt;
         let reverse = variant.reverse_word_order();
         for chunk in bytes.chunks_mut(16) {
             if reverse {
                 chunk.chunks_mut(4).for_each(|c| c.reverse());
             }
-            key.decrypt_block(aes::Block::from_mut_slice(chunk));
+            key.decrypt_block(as_block(chunk));
             if reverse {
                 chunk.chunks_mut(4).for_each(|c| c.reverse());
             }

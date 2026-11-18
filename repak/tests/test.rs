@@ -479,7 +479,12 @@ mod marvel_rivals_variant {
         let mut pak_writer = repak::PakBuilder::new()
             .key(key())
             .variant(repak::PakVariant::MarvelRivals)
-            .writer(writer, repak::Version::V11, "../../../".to_string(), Some(0));
+            .writer(
+                writer,
+                repak::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
         for (path, data) in files {
             pak_writer.write_file(path, false, *data).unwrap();
         }
@@ -598,12 +603,15 @@ mod marvel_rivals_variant {
         plain_pak_writer.write_file("f.bin", false, &data).unwrap();
         // Standard variant never encrypts file data on write (see `PakVariant`), so build the
         // comparison ciphertext directly instead.
-        use aes::cipher::BlockEncrypt;
+        use aes::cipher::BlockCipherEncrypt;
         let mut standard_cipher_block = data[..16].to_vec();
-        key().encrypt_block(aes::Block::from_mut_slice(&mut standard_cipher_block));
+        key().encrypt_block(
+            <&mut aes::Block>::try_from(standard_cipher_block.as_mut_slice()).unwrap(),
+        );
 
         assert!(
-            !buf.windows(16).any(|w| w == standard_cipher_block.as_slice()),
+            !buf.windows(16)
+                .any(|w| w == standard_cipher_block.as_slice()),
             "expected the Marvel Rivals ciphertext to differ from plain AES-ECB of the same block"
         );
     }
