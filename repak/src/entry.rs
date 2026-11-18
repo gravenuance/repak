@@ -167,7 +167,7 @@ impl Entry {
         let timestamp = (ver == VersionMajor::Initial).then_try(|| reader.read_u64::<LE>())?;
         let hash = Some(Hash(reader.read_guid()?));
         let blocks = (ver >= VersionMajor::CompressionEncryption && compression.is_some())
-            .then_try(|| reader.read_array(Block::read))?;
+            .then_try(|| ReadExt::read_array(reader, Block::read))?;
         let flags = (ver >= VersionMajor::CompressionEncryption)
             .then_try(|| reader.read_u8())?
             .unwrap_or(0);
@@ -634,16 +634,13 @@ mod test {
         };
 
         let mut placeholder_header = vec![];
-        make_entry(Some(super::Block {
-            start: 0,
-            end: 0,
-        }))
-        .write(
-            &mut placeholder_header,
-            super::Version::V3,
-            super::EntryLocation::Data,
-        )
-        .unwrap();
+        make_entry(Some(super::Block { start: 0, end: 0 }))
+            .write(
+                &mut placeholder_header,
+                super::Version::V3,
+                super::EntryLocation::Data,
+            )
+            .unwrap();
         let header_len = placeholder_header.len() as u64;
 
         let entry = make_entry(Some(super::Block {
