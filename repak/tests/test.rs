@@ -1,6 +1,6 @@
 #![cfg(feature = "default")]
 use byteorder::{ReadBytesExt, WriteBytesExt};
-use paste::paste;
+use pastey::paste;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 /// A reader that tracks how many times bytes in the inner reader been read. Useful to check read coverage.
@@ -404,7 +404,7 @@ mod roundtrip {
     macro_rules! roundtrip_tests {
         (pre_fname: $($version:ident),+ $(,)?) => {
             $(
-                paste::paste! {
+                pastey::paste! {
                     #[test]
                     fn [< roundtrip_ $version:lower _none >]() {
                         roundtrip(repak::Version::$version, None);
@@ -424,7 +424,7 @@ mod roundtrip {
         };
         (fname: $($version:ident),+ $(,)?) => {
             $(
-                paste::paste! {
+                pastey::paste! {
                     #[test]
                     fn [< roundtrip_ $version:lower _none >]() {
                         roundtrip(repak::Version::$version, None);

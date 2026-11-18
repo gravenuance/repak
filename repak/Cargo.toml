@@ -29,4 +29,4 @@ hex.workspace = true
 
 [dev-dependencies]
 base64 = { workspace = true }
-paste = "1.0.15"
+pastey = "0.2.3"
