@@ -301,7 +301,7 @@ mod linux_oodle {
                 match reloc.typ {
                     IMAGE_REL_BASED_DIR64 => {
                         let addend = block_data
-                            .and_then(|data| data.read_at::<object::U64Bytes<LE>>(offset).ok())
+                            .and_then(|data| data.read_at::<object::U64<LE>>(offset).ok())
                             .map(|addend| addend.get(LE));
                         if let Some(addend) = addend {
                             mmap[reloc.virtual_address as usize
@@ -332,13 +332,13 @@ mod linux_oodle {
                 use imports::*;
 
                 let fn_addr = match name.as_str() {
-                    "OutputDebugStringA" => OutputDebugStringA as usize,
-                    "GetProcessHeap" => GetProcessHeap as usize,
-                    "HeapAlloc" => HeapAlloc as usize,
-                    "HeapFree" => HeapFree as usize,
-                    "memset" => memset as usize,
-                    "memcpy" => memcpy as usize,
-                    "memmove" => memmove as usize,
+                    "OutputDebugStringA" => OutputDebugStringA as *const () as usize,
+                    "GetProcessHeap" => GetProcessHeap as *const () as usize,
+                    "HeapAlloc" => HeapAlloc as *const () as usize,
+                    "HeapFree" => HeapFree as *const () as usize,
+                    "memset" => memset as *const () as usize,
+                    "memcpy" => memcpy as *const () as usize,
+                    "memmove" => memmove as *const () as usize,
                     _ => {
                         unsafe { DEBUG_NAMES[i] = name.leak() }
                         let a = DEBUG_FNS[i] as usize;
@@ -356,8 +356,15 @@ mod linux_oodle {
         // Build export table
         let mut exports = HashMap::new();
         for export in obj_file.exports()? {
-            let name = String::from_utf8_lossy(export.name());
-            let address = export.address() - image_base as u64 + map_base as u64;
+            let export = export?;
+            // Ordinal-only and re-exported entries are never looked up by name.
+            let (object::NameOrOrdinal::Name(name), object::ExportTarget::Address { address }) =
+                (export.name(), export.target())
+            else {
+                continue;
+            };
+            let name = String::from_utf8_lossy(name).into_owned();
+            let address = address - image_base as u64 + map_base as u64;
             exports.insert(name, address as *const c_void);
         }
 
@@ -374,13 +381,13 @@ mod linux_oodle {
                 _ => unreachable!(),
             };
 
-            if 0 != flags & IMAGE_SCN_MEM_READ {
+            if flags.contains(IMAGE_SCN_MEM_READ) {
                 permissions |= libc::PROT_READ;
             }
-            if 0 != flags & IMAGE_SCN_MEM_WRITE {
+            if flags.contains(IMAGE_SCN_MEM_WRITE) {
                 permissions |= libc::PROT_WRITE;
             }
-            if 0 != flags & IMAGE_SCN_MEM_EXECUTE {
+            if flags.contains(IMAGE_SCN_MEM_EXECUTE) {
                 permissions |= libc::PROT_EXEC;
             }
 
