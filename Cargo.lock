@@ -763,6 +763,7 @@ name = "repak_bind"
 version = "0.2.3"
 dependencies = [
  "aes",
+ "libloading",
  "repak",
 ]
 

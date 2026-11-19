@@ -10,6 +10,11 @@ keywords.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# repak's `oodle` feature (oodle_loader) downloads a DLL, so it stays off here: the host supplies
+# Oodle through PakBuilder::oodle. Build the DLL with `cargo build -p repak_bind`; a `--workspace`
+# build unifies repak_cli's `oodle` feature into repak and makes the DLL larger, though
+# pak_builder_new always supplies a getter, so the download path is never reached.
 [dependencies]
-repak = { path = "../repak", features = ["oodle"] }
+repak = { path = "../repak" }
 aes = { workspace = true }
+libloading = "0.9"

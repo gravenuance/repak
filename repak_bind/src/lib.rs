@@ -1,3 +1,5 @@
+mod oodle;
+
 use repak::Compression;
 use repak::PakBuilder;
 use repak::PakReader;
@@ -76,9 +78,11 @@ impl Seek for Stream {
     }
 }
 
+/// Creates a builder that reads Oodle entries through the host's own `oo2core` DLL
+/// (see the `oodle` module); the library never downloads one.
 #[no_mangle]
 pub extern "C" fn pak_builder_new() -> *mut PakBuilder {
-    Box::into_raw(Box::new(PakBuilder::new()))
+    Box::into_raw(Box::new(PakBuilder::new().oodle(oodle::getter)))
 }
 
 /// Frees a builder that was never consumed by `pak_builder_reader` or `pak_builder_writer`.
