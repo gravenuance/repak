@@ -1,17 +1,17 @@
 //! Oodle is the `COMPRESS_Custom` (ECompressionFlags 0x04) codec of legacy UE4 paks such as
 //! Days Gone's. It is proprietary and the host (UAssetEditor, see its ADR 0001) supplies its own
-//! copy, so this loads `OodleLZ_Decompress` from a DLL on disk and never touches the network:
-//! first the file named by `REPAK_OODLE_DLL`, then `oo2core_9_win64.dll` beside the host
-//! executable, then by bare name (working folder, `PATH`). The lookup runs once per process and
-//! its result, a failed one included, is kept.
+//! copy, so this loads `OodleLZ_Decompress` from the DLL that `REPAK_OODLE_DLL` names and never
+//! touches the network. Only that absolute path is tried: no search of the executable's folder,
+//! the working folder or `PATH`, where a planted DLL could load instead of the host's validated
+//! one. A successful load is kept for the process; a failure is not, so a host that fixes the
+//! variable is picked up on the next read.
 
 use std::ffi::OsString;
 use std::os::raw::c_void;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::OnceLock;
 
 pub const ENV_VAR: &str = "REPAK_OODLE_DLL";
-const DLL_NAME: &str = "oo2core_9_win64.dll";
 
 type OodleLzDecompress = unsafe extern "win64" fn(
     *const c_void,
@@ -36,52 +36,41 @@ struct Loaded {
     decompress: OodleLzDecompress,
 }
 
-static OODLE: OnceLock<Option<Loaded>> = OnceLock::new();
+static OODLE: OnceLock<Loaded> = OnceLock::new();
 
-/// Where to look, in order.
-fn candidate_paths(explicit: Option<OsString>, exe: Option<PathBuf>) -> Vec<PathBuf> {
-    let mut paths = vec![];
-    if let Some(explicit) = explicit {
-        paths.push(PathBuf::from(explicit));
+fn load(path: &Path) -> Option<Loaded> {
+    // A relative path would make the loader search the working folder and PATH.
+    if !path.is_absolute() {
+        return None;
     }
-    if let Some(exe) = exe {
-        paths.push(exe.with_file_name(DLL_NAME));
+    // SAFETY: loading a library runs its initialisers; the host validated this path and
+    // accepts running the Oodle DLL it points at (ADR 0001).
+    unsafe {
+        let library = libloading::Library::new(path).ok()?;
+        let decompress = *library
+            .get::<OodleLzDecompress>(b"OodleLZ_Decompress\0")
+            .ok()?;
+        Some(Loaded {
+            _library: library,
+            decompress,
+        })
     }
-    paths.push(PathBuf::from(DLL_NAME));
-    paths
 }
 
-fn load_first(paths: &[PathBuf]) -> Option<Loaded> {
-    paths.iter().find_map(|path| {
-        // SAFETY: loading a library runs its initialisers; the host chose these paths and
-        // accepts running the Oodle DLL it points at (ADR 0001).
-        unsafe {
-            let library = libloading::Library::new(path).ok()?;
-            let decompress = *library
-                .get::<OodleLzDecompress>(b"OodleLZ_Decompress\0")
-                .ok()?;
-            Some(Loaded {
-                _library: library,
-                decompress,
-            })
-        }
-    })
-}
-
-fn cached(
-    cell: &OnceLock<Option<Loaded>>,
-    load: impl FnOnce() -> Option<Loaded>,
+/// The loaded library, loading it from the path `variable()` gives if none is loaded yet.
+fn library_in(
+    cell: &OnceLock<Loaded>,
+    variable: impl FnOnce() -> Option<OsString>,
 ) -> Option<&Loaded> {
-    cell.get_or_init(load).as_ref()
+    if let Some(loaded) = cell.get() {
+        return Some(loaded);
+    }
+    let loaded = load(Path::new(&variable()?))?;
+    Some(cell.get_or_init(|| loaded))
 }
 
 fn library() -> Option<&'static Loaded> {
-    cached(&OODLE, || {
-        load_first(&candidate_paths(
-            std::env::var_os(ENV_VAR),
-            std::env::current_exe().ok(),
-        ))
-    })
+    library_in(&OODLE, || std::env::var_os(ENV_VAR))
 }
 
 fn decompress(comp_buf: &[u8], raw_buf: &mut [u8]) -> i32 {
@@ -114,11 +103,11 @@ fn decompress(comp_buf: &[u8], raw_buf: &mut [u8]) -> i32 {
 fn require(loaded: Option<&Loaded>) -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
     match loaded {
         Some(_) => Ok(decompress),
-        None => Err(format!("{DLL_NAME} not found (set {ENV_VAR} to its path)").into()),
+        None => Err(format!("{ENV_VAR} is unset or does not name a loadable Oodle DLL").into()),
     }
 }
 
-/// The getter handed to `PakBuilder::oodle`; fails when no DLL loads.
+/// The getter handed to `PakBuilder::oodle`; fails when the DLL does not load.
 pub fn getter() -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
     require(library())
 }
@@ -127,55 +116,54 @@ pub fn getter() -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::path::PathBuf;
 
-    #[test]
-    fn candidates_are_the_variable_then_beside_the_exe_then_the_bare_name() {
-        let paths = candidate_paths(
-            Some("C:/games/oo2core_7_win64.dll".into()),
-            Some(PathBuf::from("C:/host/worker.exe")),
-        );
-        assert_eq!(
-            paths,
-            [
-                PathBuf::from("C:/games/oo2core_7_win64.dll"),
-                PathBuf::from("C:/host/oo2core_9_win64.dll"),
-                PathBuf::from("oo2core_9_win64.dll"),
-            ]
-        );
+    fn absolute_missing() -> OsString {
+        std::env::temp_dir()
+            .join("repak_bind_no_such_oo2core_9_win64.dll")
+            .into_os_string()
     }
 
     #[test]
-    fn candidates_without_a_variable_or_exe_are_just_the_bare_name() {
-        assert_eq!(
-            candidate_paths(None, None),
-            [PathBuf::from("oo2core_9_win64.dll")]
-        );
+    fn unset_variable_loads_nothing() {
+        assert!(library_in(&OnceLock::new(), || None).is_none());
     }
 
     #[test]
-    fn paths_that_are_not_libraries_load_nothing() {
-        let missing = std::env::temp_dir().join("repak_bind_no_such_oo2core_win64.dll");
+    fn missing_file_loads_nothing() {
+        assert!(library_in(&OnceLock::new(), || Some(absolute_missing())).is_none());
+    }
+
+    #[test]
+    fn file_that_is_not_a_library_loads_nothing() {
         let not_a_dll = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        assert!(load_first(&[missing, not_a_dll]).is_none());
+        assert!(library_in(&OnceLock::new(), || Some(not_a_dll.into_os_string())).is_none());
+    }
+
+    #[test]
+    fn relative_path_is_never_handed_to_the_loader() {
+        // A bare name would make the OS loader search the working folder and PATH.
+        let not_absolute = OsString::from("oo2core_9_win64.dll");
+        assert!(library_in(&OnceLock::new(), || Some(not_absolute)).is_none());
+    }
+
+    #[test]
+    fn each_call_after_a_failure_reads_the_variable_again() {
+        let cell = OnceLock::new();
+        let reads = Cell::new(0);
+        for _ in 0..3 {
+            let loaded = library_in(&cell, || {
+                reads.set(reads.get() + 1);
+                Some(absolute_missing())
+            });
+            assert!(loaded.is_none());
+        }
+        assert_eq!(reads.get(), 3);
     }
 
     #[test]
     fn no_library_is_the_error_the_core_reports_as_a_missing_oodle_pointer() {
         let error = require(None).err().unwrap();
         assert!(error.to_string().contains(ENV_VAR), "{error}");
-    }
-
-    #[test]
-    fn the_lookup_runs_once_even_when_it_found_nothing() {
-        let cell = OnceLock::new();
-        let calls = Cell::new(0);
-        for _ in 0..3 {
-            assert!(cached(&cell, || {
-                calls.set(calls.get() + 1);
-                None
-            })
-            .is_none());
-        }
-        assert_eq!(calls.get(), 1);
     }
 }
