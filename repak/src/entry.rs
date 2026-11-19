@@ -508,7 +508,9 @@ impl Entry {
                     }
                     Compression::Oodle => {
                         let supplied = oodle
-                            .map(|getter| getter().map_err(|_| Error::OodleUnavailable))
+                            .map(|getter| {
+                                getter().map_err(|error| Error::OodleUnavailable(error.to_string()))
+                            })
                             .transpose()?;
                         let mut decompressed = vec![0; self.uncompressed as usize];
                         for (decomp_chunk, comp_range) in

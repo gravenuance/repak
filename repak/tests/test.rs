@@ -501,11 +501,11 @@ mod supplied_oodle {
     }
 
     #[test]
-    fn failing_getter_reports_the_missing_oodle_pointer() {
+    fn failing_getter_reports_the_missing_oodle_pointer_and_why() {
         let error = read(repak::PakBuilder::new().oodle(|| Err("no dll".into()))).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "pointer to OodleLZ_Decompress was not provided"
+            "pointer to OodleLZ_Decompress was not provided: no dll"
         );
     }
 
