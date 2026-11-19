@@ -759,6 +759,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "repak_bind"
+version = "0.2.3"
+dependencies = [
+ "aes",
+ "repak",
+]
+
+[[package]]
 name = "repak_cli"
 version = "0.2.3"
 dependencies = [

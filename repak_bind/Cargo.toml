@@ -1,0 +1,15 @@
+[package]
+name = "repak_bind"
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+keywords.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+repak = { path = "../repak", features = ["oodle"] }
+aes = { workspace = true }
