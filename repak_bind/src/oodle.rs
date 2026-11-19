@@ -13,7 +13,9 @@ use std::sync::OnceLock;
 
 pub const ENV_VAR: &str = "REPAK_OODLE_DLL";
 
-type OodleLzDecompress = unsafe extern "win64" fn(
+// "system" is the Windows calling convention for the Windows DLL and the platform's C one for
+// Oodle's native libraries, so the module builds on every target (`win64` exists only on x86-64).
+type OodleLzDecompress = unsafe extern "system" fn(
     *const c_void,
     isize,
     *mut c_void,
