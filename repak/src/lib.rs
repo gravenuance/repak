@@ -24,6 +24,7 @@ pub const MAGIC: u32 = 0x5A6F12E1;
     strum::EnumString,
     strum::VariantNames,
 )]
+#[repr(u8)]
 pub enum Version {
     V0,
     V1,
@@ -115,6 +116,7 @@ impl Version {
 #[derive(
     Clone, Copy, PartialEq, Eq, Debug, strum::Display, strum::EnumString, strum::VariantNames,
 )]
+#[repr(u8)]
 pub enum Compression {
     Zlib,
     Gzip,
