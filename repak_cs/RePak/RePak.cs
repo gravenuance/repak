@@ -27,7 +27,8 @@ public enum Compression : byte
     Zlib,
     Gzip,
     Oodle,
-    Zstd
+    Zstd,
+    LZ4
 }
 
 public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid

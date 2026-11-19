@@ -49,6 +49,28 @@ public class UnitTest1
     }
 
     [Fact]
+    public void TestLz4RoundTrip()
+    {
+        // Rust's Compression::LZ4 is the fifth variant of a #[repr(u8)] enum.
+        Assert.Equal(4, (byte)Compression.LZ4);
+        var contents = Encoding.ASCII.GetBytes(new string('a', 1000));
+        using var stream = new MemoryStream();
+        using (var builder = new PakBuilder())
+        {
+            builder.Compression(new[] { Compression.LZ4 });
+            using var writer = builder.Writer(stream);
+            writer.WriteFile("lz4.txt", contents);
+            writer.WriteIndex();
+        }
+
+        using (var builder = new PakBuilder())
+        {
+            using var reader = builder.Reader(stream);
+            Assert.Equal(contents, reader.Get(stream, "lz4.txt"));
+        }
+    }
+
+    [Fact]
     public void TestWritePak()
     {
         Console.WriteLine("Writing pak");
