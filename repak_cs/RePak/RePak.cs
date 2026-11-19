@@ -31,6 +31,13 @@ public enum Compression : byte
     LZ4
 }
 
+/// <summary>A game's deviations from the standard pak format; the values match repak_bind's.</summary>
+public enum PakVariant : byte
+{
+    Standard = 0,
+    MarvelRivals = 1
+}
+
 public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid
 {
     public PakBuilder() : base(true)
@@ -47,6 +54,14 @@ public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid
     {
         if (key.Length != 32) throw new Exception("Invalid AES key length");
         SetHandle(RePakInterop.pak_builder_key(handle, key));
+        return this;
+    }
+
+    /// <summary>Selects a game's pak format; builders default to <see cref="PakVariant.Standard"/>.</summary>
+    public PakBuilder Variant(PakVariant variant)
+    {
+        SetHandle(RePakInterop.pak_builder_variant(handle, (byte)variant));
+        if (handle == IntPtr.Zero) throw new Exception($"Unknown pak variant {variant}");
         return this;
     }
 

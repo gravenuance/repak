@@ -29,6 +29,8 @@ public class RePakInterop
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pak_builder_key(IntPtr builder, byte[] key);
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pak_builder_variant(IntPtr builder, byte variant);
+    [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pak_builder_compression(IntPtr builder, byte[] compressions, int length);
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pak_builder_reader(IntPtr builder, StreamCallbacks ctx);

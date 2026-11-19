@@ -3,6 +3,7 @@ mod oodle;
 use repak::Compression;
 use repak::PakBuilder;
 use repak::PakReader;
+use repak::PakVariant;
 use repak::PakWriter;
 use repak::Version;
 use std::ffi::CString;
@@ -144,6 +145,34 @@ pub unsafe extern "C" fn pak_builder_key(
     use aes::cipher::KeyInit;
     let builder = Box::from_raw(builder).key(aes::Aes256::new_from_slice(key).unwrap());
     Box::into_raw(Box::new(builder))
+}
+
+/// The wire values of `repak::PakVariant`, matching the C# `PakVariant` enum.
+fn variant_from_byte(variant: u8) -> Option<PakVariant> {
+    match variant {
+        0 => Some(PakVariant::Standard),
+        1 => Some(PakVariant::MarvelRivals),
+        _ => None,
+    }
+}
+
+/// Selects a game's pak format variant (0 standard, 1 Marvel Rivals) and returns the builder
+/// to continue with; the old pointer is consumed. Returns null, with the builder freed, for a
+/// value that is no variant. Builders default to the standard variant.
+///
+/// # Safety
+///
+/// `builder` must come from this library and not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn pak_builder_variant(
+    builder: *mut PakBuilder,
+    variant: u8,
+) -> *mut PakBuilder {
+    let builder = Box::from_raw(builder);
+    match variant_from_byte(variant) {
+        Some(variant) => Box::into_raw(Box::new(builder.variant(variant))),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Sets the allowed compression methods and returns the builder to continue with; the old pointer is consumed.
@@ -311,5 +340,150 @@ pub unsafe extern "C" fn pak_writer_write_index(writer: *mut PakWriter<Stream>) 
     match unsafe { Box::from_raw(writer) }.write_index() {
         Ok(_) => 0,
         Err(_) => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    type Memory = Cursor<Vec<u8>>;
+
+    extern "C" fn read(context: *mut c_void, buf: *mut u8, len: usize) -> isize {
+        // SAFETY: `context` is the `Memory` the test passes in `callbacks`, and `buf` is valid for `len`.
+        let (memory, buf) = unsafe {
+            (
+                &mut *context.cast::<Memory>(),
+                std::slice::from_raw_parts_mut(buf, len),
+            )
+        };
+        memory.read(buf).map_or(-1, |n| n as isize)
+    }
+
+    extern "C" fn write(context: *mut c_void, buf: *const u8, len: usize) -> isize {
+        // SAFETY: as in `read`.
+        let (memory, buf) = unsafe {
+            (
+                &mut *context.cast::<Memory>(),
+                std::slice::from_raw_parts(buf, len),
+            )
+        };
+        memory.write(buf).map_or(-1, |n| n as isize)
+    }
+
+    extern "C" fn seek(context: *mut c_void, offset: i64, whence: i32) -> i64 {
+        // SAFETY: as in `read`.
+        let memory = unsafe { &mut *context.cast::<Memory>() };
+        let target = match whence {
+            0 => SeekFrom::Start(offset as u64),
+            1 => SeekFrom::Current(offset),
+            _ => SeekFrom::End(offset),
+        };
+        memory.seek(target).map_or(-1, |at| at as i64)
+    }
+
+    extern "C" fn flush(_context: *mut c_void) -> i32 {
+        0
+    }
+
+    fn callbacks(memory: &mut Memory) -> StreamCallbacks {
+        StreamCallbacks {
+            context: (memory as *mut Memory).cast(),
+            read,
+            write,
+            seek,
+            flush,
+        }
+    }
+
+    const KEY: [u8; 32] = [7; 32];
+
+    /// A builder with the key and variant set, as a C# caller would build it.
+    unsafe fn builder(variant: u8) -> *mut PakBuilder {
+        let builder = pak_builder_key(pak_builder_new(), &KEY);
+        pak_builder_variant(builder, variant)
+    }
+
+    fn contents() -> Vec<u8> {
+        b"some file contents".repeat(100)
+    }
+
+    fn write_pak(variant: u8) -> Memory {
+        let contents = contents();
+        let mut memory = Memory::new(vec![]);
+        // SAFETY: every pointer comes from this library or the locals above and outlives its call.
+        unsafe {
+            let writer = pak_builder_writer(
+                builder(variant),
+                callbacks(&mut memory),
+                Version::V11,
+                c"../../../".as_ptr(),
+                0,
+            );
+            let result = pak_writer_write_file(
+                writer,
+                c"a/file.txt".as_ptr(),
+                contents.as_ptr(),
+                contents.len(),
+            );
+            assert_eq!(result, 0);
+            assert_eq!(pak_writer_write_index(writer), 0);
+        }
+        memory
+    }
+
+    /// The entry's bytes, or None when the pak or the entry cannot be read.
+    fn read_pak(variant: u8, memory: &mut Memory) -> Option<Vec<u8>> {
+        // SAFETY: as in `write_pak`; the buffer is freed with the matching drop.
+        unsafe {
+            let reader = pak_builder_reader(builder(variant), callbacks(memory));
+            if reader.is_null() {
+                return None;
+            }
+            let (mut buffer, mut length, mut error) =
+                (std::ptr::null_mut(), 0, std::ptr::null_mut());
+            let result = pak_reader_get(
+                &*reader,
+                c"a/file.txt".as_ptr(),
+                callbacks(memory),
+                &mut buffer,
+                &mut length,
+                &mut error,
+            );
+            pak_reader_drop(reader);
+            if result != 0 {
+                pak_cstring_drop(error);
+                return None;
+            }
+            let data = std::slice::from_raw_parts(buffer, length).to_vec();
+            pak_buffer_drop(buffer, length);
+            Some(data)
+        }
+    }
+
+    #[test]
+    fn marvel_rivals_pak_round_trips_through_the_c_api() {
+        let mut memory = write_pak(1);
+        assert_eq!(read_pak(1, &mut memory), Some(contents()));
+    }
+
+    #[test]
+    fn standard_variant_does_not_read_a_marvel_rivals_pak() {
+        let mut memory = write_pak(1);
+        assert_ne!(read_pak(0, &mut memory), Some(contents()));
+    }
+
+    #[test]
+    fn variant_that_is_not_one_yields_no_builder() {
+        // SAFETY: the builder comes from this library and is consumed by the call.
+        assert!(unsafe { pak_builder_variant(pak_builder_new(), 2) }.is_null());
+    }
+
+    #[test]
+    fn variant_bytes_map_to_the_variants() {
+        assert_eq!(variant_from_byte(0), Some(PakVariant::Standard));
+        assert_eq!(variant_from_byte(1), Some(PakVariant::MarvelRivals));
+        assert_eq!(variant_from_byte(255), None);
     }
 }

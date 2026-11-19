@@ -70,6 +70,47 @@ public class UnitTest1
         }
     }
 
+    private static readonly byte[] MarvelKey = Enumerable.Repeat((byte)7, 32).ToArray();
+    private static readonly byte[] MarvelContents = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("some file contents", 100)));
+
+    private static MemoryStream WriteMarvelRivalsPak()
+    {
+        var stream = new MemoryStream();
+        using var builder = new PakBuilder();
+        builder.Key(MarvelKey).Variant(PakVariant.MarvelRivals);
+        using var writer = builder.Writer(stream);
+        writer.WriteFile("a/file.txt", MarvelContents);
+        writer.WriteIndex();
+        return stream;
+    }
+
+    [Fact]
+    public void TestMarvelRivalsRoundTrip()
+    {
+        using var stream = WriteMarvelRivalsPak();
+
+        using var builder = new PakBuilder();
+        builder.Key(MarvelKey).Variant(PakVariant.MarvelRivals);
+        using var reader = builder.Reader(stream);
+        Assert.Equal(MarvelContents, reader.Get(stream, "a/file.txt"));
+    }
+
+    [Fact]
+    public void TestStandardVariantDoesNotReadAMarvelRivalsPak()
+    {
+        using var stream = WriteMarvelRivalsPak();
+
+        byte[]? read = null;
+        Record.Exception(() =>
+        {
+            using var builder = new PakBuilder();
+            builder.Key(MarvelKey);
+            using var reader = builder.Reader(stream);
+            read = reader.Get(stream, "a/file.txt");
+        });
+        Assert.NotEqual(MarvelContents, read);
+    }
+
     [Fact]
     public void TestWritePak()
     {
