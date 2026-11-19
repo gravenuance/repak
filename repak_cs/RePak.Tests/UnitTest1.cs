@@ -150,6 +150,38 @@ public class UnitTest1
     }
 
     [Fact]
+    public void TestALaterFailureDoesNotCarryAnEarlierStreamException()
+    {
+        using var stream = new FailsDifferentlyStream();
+        using var builder = new PakBuilder();
+        using var writer = builder.Writer(stream);
+
+        var first = Assert.Throws<RePakException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
+        Assert.IsType<IOException>(first.InnerException);
+        var later = Assert.Throws<RePakException>(() => writer.WriteFile("b.txt", new byte[] { 1 }));
+        Assert.IsType<InvalidOperationException>(later.InnerException);
+    }
+
+    private sealed class FailsDifferentlyStream : MemoryStream
+    {
+        private int _writes;
+
+        public override void Write(ReadOnlySpan<byte> buffer) =>
+            throw (_writes++ == 0 ? new IOException("disk full") : new InvalidOperationException("closed"));
+    }
+
+    [Fact]
+    public void TestAnInteriorNulInANameIsRefused()
+    {
+        using var stream = new MemoryStream();
+        using var builder = new PakBuilder();
+        using var writer = builder.Writer(stream);
+
+        // Marshalling would cut the name at the NUL and write "b" instead.
+        Assert.Throws<ArgumentException>(() => writer.WriteFile("b\0c.txt", new byte[] { 1 }));
+    }
+
+    [Fact]
     public void TestStreamThatThrowsOnReadGivesAManagedException()
     {
         using var builder = new PakBuilder();

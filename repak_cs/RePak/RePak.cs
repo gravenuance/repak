@@ -55,6 +55,16 @@ public sealed class RePakException : Exception
 
 internal static class NativeError
 {
+    /// <summary>
+    /// Refuses a null string or one with an interior NUL: UTF-8 marshalling ends the native string at the NUL,
+    /// so the native side would silently see only the part before it.
+    /// </summary>
+    public static void ThrowIfNotNativeString(string value, string paramName)
+    {
+        ArgumentNullException.ThrowIfNull(value, paramName);
+        if (value.Contains('\0')) throw new ArgumentException("must not contain a NUL character", paramName);
+    }
+
     /// <summary>Reads and frees a native message; null pointer gives a generic text.</summary>
     public static string Consume(IntPtr message)
     {
@@ -137,7 +147,7 @@ public class PakBuilder : SafeHandleZeroOrMinusOneIsInvalid
     public PakWriter Writer(Stream stream, Version version = Version.V11, string mountPoint = "../../../", ulong pathHashSeed = 0)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        ArgumentNullException.ThrowIfNull(mountPoint);
+        NativeError.ThrowIfNotNativeString(mountPoint, nameof(mountPoint));
         EnsureValid();
 
         var streamCtx = StreamCallbacks.Create(stream);
@@ -198,11 +208,12 @@ public class PakWriter : SafeHandleZeroOrMinusOneIsInvalid
 
     public void WriteFile(string path, byte[] data)
     {
-        ArgumentNullException.ThrowIfNull(path);
+        NativeError.ThrowIfNotNativeString(path, nameof(path));
         ArgumentNullException.ThrowIfNull(data);
         EnsureValid();
         int result = RePakInterop.pak_writer_write_file(handle, path, data, (nuint)data.Length);
-        if (result != 0) throw NativeError.Failure($"Failed to write {path}", StreamCallbacks.ErrorOf(_streamCtx));
+        var streamError = StreamCallbacks.ErrorOf(_streamCtx);
+        if (result != 0) throw NativeError.Failure($"Failed to write {path}", streamError);
     }
 
     /// <summary>Writes the index and finishes the pak; the writer cannot be used afterwards.</summary>
@@ -212,7 +223,8 @@ public class PakWriter : SafeHandleZeroOrMinusOneIsInvalid
         int result = RePakInterop.pak_writer_write_index(handle);
 
         // write_index consumes the writer, whatever the result
-        var failure = result != 0 ? NativeError.Failure("Failed to write the index", StreamCallbacks.ErrorOf(_streamCtx)) : null;
+        var streamError = StreamCallbacks.ErrorOf(_streamCtx);
+        var failure = result != 0 ? NativeError.Failure("Failed to write the index", streamError) : null;
         SetHandleAsInvalid();
         SetHandle(IntPtr.Zero);
         StreamCallbacks.Free(_streamCtx);
@@ -260,7 +272,7 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
     public byte[] Get(Stream stream, string path)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        ArgumentNullException.ThrowIfNull(path);
+        NativeError.ThrowIfNotNativeString(path, nameof(path));
         EnsureValid();
 
         var streamCtx = StreamCallbacks.Create(stream);
@@ -342,8 +354,17 @@ internal static unsafe class StreamCallbacks
         GCHandle.FromIntPtr(streamCtx).Free();
     }
 
-    /// <summary>The exception the stream threw during a callback, which the native call reports only as a failed result.</summary>
-    public static Exception? ErrorOf(IntPtr streamCtx) => (GCHandle.FromIntPtr(streamCtx).Target as StreamState)?.Error;
+    /// <summary>
+    /// Takes the exception the stream threw during the last native call, which that call reports only as a failed result.
+    /// Taking it clears it, so a writer used again after a failure never blames a later error on an old stream exception.
+    /// </summary>
+    public static Exception? ErrorOf(IntPtr streamCtx)
+    {
+        if (GCHandle.FromIntPtr(streamCtx).Target is not StreamState state) return null;
+        var error = state.Error;
+        state.Error = null;
+        return error;
+    }
 
     // An exception must not cross into native code: each callback keeps the stream's exception
     // for the managed caller and reports the failure through its negative return value.
