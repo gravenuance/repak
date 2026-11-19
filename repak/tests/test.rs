@@ -458,6 +458,67 @@ mod roundtrip {
     roundtrip_tests!(fname: V8A, V8B, V9, V11);
 }
 
+mod supplied_oodle {
+    use std::io::Cursor;
+
+    /// A v11 pak holding one Zlib entry, with the footer's compression name rewritten to Oodle
+    /// (repak cannot write Oodle), so reading the entry must go through the Oodle decompressor.
+    fn oodle_marked_pak() -> Vec<u8> {
+        let mut pak_writer = repak::PakBuilder::new()
+            .compression([repak::Compression::Zlib])
+            .writer(
+                Cursor::new(vec![]),
+                repak::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        pak_writer.write_file("a.bin", true, [7u8; 64]).unwrap();
+        let mut buf = pak_writer.write_index().unwrap().into_inner();
+
+        let name = b"Zlib\0";
+        let at = buf.windows(name.len()).rposition(|w| w == name).unwrap();
+        buf[at..at + b"Oodle\0".len()].copy_from_slice(b"Oodle\0");
+        buf
+    }
+
+    fn fill_with_ones(_comp: &[u8], raw: &mut [u8]) -> i32 {
+        raw.fill(1);
+        raw.len() as i32
+    }
+
+    fn read(builder: repak::PakBuilder) -> Result<Vec<u8>, repak::Error> {
+        let buf = oodle_marked_pak();
+        let mut cursor = Cursor::new(&buf);
+        builder
+            .reader_with_version(&mut cursor, repak::Version::V11)?
+            .get("a.bin", &mut cursor)
+    }
+
+    #[test]
+    fn entry_is_decompressed_by_the_supplied_function() {
+        let data = read(repak::PakBuilder::new().oodle(|| Ok(fill_with_ones))).unwrap();
+        assert_eq!(data, [1u8; 64]);
+    }
+
+    #[test]
+    fn failing_getter_reports_the_missing_oodle_pointer() {
+        let error = read(repak::PakBuilder::new().oodle(|| Err("no dll".into()))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "pointer to OodleLZ_Decompress was not provided"
+        );
+    }
+
+    #[test]
+    fn supplied_function_returning_zero_is_a_decompression_failure() {
+        let error = read(repak::PakBuilder::new().oodle(|| Ok(|_, _| 0))).unwrap_err();
+        assert!(matches!(
+            error,
+            repak::Error::DecompressionFailed(repak::Compression::Oodle)
+        ));
+    }
+}
+
 mod malformed_index {
     use std::io::Cursor;
 

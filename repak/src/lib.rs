@@ -11,6 +11,12 @@ pub use {data::PartialEntry, error::*, pak::*, variant::PakVariant};
 
 pub const MAGIC: u32 = 0x5A6F12E1;
 
+/// Decompresses one Oodle block into `raw_buf` and returns the bytes written, 0 on failure.
+pub type OodleDecompress = fn(comp_buf: &[u8], raw_buf: &mut [u8]) -> i32;
+
+/// Supplies the Oodle decompressor, called once per entry that needs it. See [`PakBuilder::oodle`].
+pub type OodleGetter = fn() -> Result<OodleDecompress, Box<dyn std::error::Error>>;
+
 #[derive(
     Clone,
     Copy,

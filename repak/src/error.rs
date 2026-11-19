@@ -42,6 +42,10 @@ pub enum Error {
     #[error("found magic of {:#x} instead of {:#x}", .0, super::MAGIC)]
     Magic(u32),
 
+    // UAssetEditor recognises a missing Oodle library by this exact text.
+    #[error("pointer to OodleLZ_Decompress was not provided")]
+    OodleUnavailable,
+
     #[cfg(feature = "oodle")]
     #[error("Oodle loader error: {0}")]
     OodleFailed(#[from] oodle_loader::Error),

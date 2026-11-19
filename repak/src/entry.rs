@@ -1,4 +1,4 @@
-use crate::{data::build_partial_entry, variant::EncryptionContext, Error, Hash};
+use crate::{data::build_partial_entry, variant::EncryptionContext, Error, Hash, OodleGetter};
 
 use super::{ext::BoolExt, ext::ReadExt, Compression, Version, VersionMajor};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
@@ -37,6 +37,17 @@ fn decompress_raw_zstd_block(dst: &mut [u8], src: &[u8]) -> Result<usize, ()> {
         zstd_sys::ZSTD_freeDCtx(dctx);
         result
     }
+}
+
+/// Oodle through the `oodle` feature's downloaded library, used when the builder supplies none.
+#[cfg(all(feature = "compression", feature = "oodle"))]
+fn oodle_loader_decompress(input: &[u8], output: &mut [u8]) -> Result<isize, Error> {
+    Ok(oodle_loader::oodle()?.decompress(input, output))
+}
+
+#[cfg(all(feature = "compression", not(feature = "oodle")))]
+fn oodle_loader_decompress(_input: &[u8], _output: &mut [u8]) -> Result<isize, Error> {
+    Err(Error::Oodle)
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -375,6 +386,7 @@ impl Entry {
         version: Version,
         compression: &[Option<Compression>],
         #[allow(unused)] ctx: EncryptionContext,
+        #[allow(unused)] oodle: Option<OodleGetter>,
         buf: &mut W,
     ) -> Result<(), super::Error> {
         reader.seek(io::SeekFrom::Start(self.offset))?;
@@ -494,22 +506,25 @@ impl Entry {
                         }
                         buf.write_all(&decompressed)?;
                     }
-                    #[cfg(feature = "oodle")]
                     Compression::Oodle => {
+                        let supplied = oodle
+                            .map(|getter| getter().map_err(|_| Error::OodleUnavailable))
+                            .transpose()?;
                         let mut decompressed = vec![0; self.uncompressed as usize];
                         for (decomp_chunk, comp_range) in
                             decompressed.chunks_mut(chunk_size).zip(ranges)
                         {
-                            let out =
-                                oodle_loader::oodle()?.decompress(&data[comp_range], decomp_chunk);
+                            let comp_data = &data[comp_range];
+                            let out = match supplied {
+                                Some(decompress) => decompress(comp_data, decomp_chunk) as isize,
+                                None => oodle_loader_decompress(comp_data, decomp_chunk)?,
+                            };
                             if out == 0 {
                                 return Err(Error::DecompressionFailed(Compression::Oodle));
                             }
                         }
                         buf.write_all(&decompressed)?;
                     }
-                    #[cfg(not(feature = "oodle"))]
-                    Compression::Oodle => return Err(super::Error::Oodle),
                 }
             }
         }
@@ -577,6 +592,7 @@ mod test {
             super::Version::V3,
             &compression,
             ctx,
+            None,
             &mut out,
         );
 
@@ -670,6 +686,7 @@ mod test {
                 super::Version::V3,
                 &compression,
                 ctx,
+                None,
                 &mut out,
             )
             .unwrap();
@@ -718,6 +735,7 @@ mod test {
                 super::Version::V11,
                 &[],
                 ctx,
+                None,
                 &mut out,
             )
             .unwrap();

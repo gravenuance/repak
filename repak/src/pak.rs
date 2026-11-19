@@ -1,6 +1,6 @@
 use crate::data::build_partial_entry;
 use crate::entry::Entry;
-use crate::{Compression, Error, PakVariant, PartialEntry};
+use crate::{Compression, Error, OodleGetter, PakVariant, PartialEntry};
 
 use super::ext::{ReadExt, WriteExt};
 use super::{Version, VersionMajor};
@@ -21,6 +21,7 @@ pub struct PakBuilder {
     key: super::Key,
     variant: PakVariant,
     allowed_compression: Vec<Compression>,
+    oodle: Option<OodleGetter>,
 }
 
 impl Default for PakBuilder {
@@ -35,7 +36,15 @@ impl PakBuilder {
             key: Default::default(),
             variant: Default::default(),
             allowed_compression: Default::default(),
+            oodle: None,
         }
+    }
+    /// Reads Oodle entries with the decompressor `getter` supplies instead of the `oodle`
+    /// feature's downloaded library, so a host that must not use the network brings its own.
+    /// A getter that fails makes an Oodle entry read fail with `Error::OodleUnavailable`.
+    pub fn oodle(mut self, getter: OodleGetter) -> Self {
+        self.oodle = Some(getter);
+        self
     }
     #[cfg(feature = "encryption")]
     pub fn key(mut self, key: aes::Aes256) -> Self {
@@ -54,14 +63,14 @@ impl PakBuilder {
         self
     }
     pub fn reader<R: Read + Seek>(self, reader: &mut R) -> Result<PakReader, super::Error> {
-        PakReader::new_any_inner(reader, self.key, self.variant)
+        PakReader::new_any_inner(reader, self.key, self.variant, self.oodle)
     }
     pub fn reader_with_version<R: Read + Seek>(
         self,
         reader: &mut R,
         version: super::Version,
     ) -> Result<PakReader, super::Error> {
-        PakReader::new_inner(reader, version, self.key, self.variant)
+        PakReader::new_inner(reader, version, self.key, self.variant, self.oodle)
     }
     pub fn writer<W: Write + Seek>(
         self,
@@ -87,6 +96,7 @@ pub struct PakReader {
     pak: Pak,
     key: super::Key,
     variant: PakVariant,
+    oodle: Option<OodleGetter>,
 }
 
 #[derive(Debug)]
@@ -159,13 +169,21 @@ impl PakReader {
         reader: &mut R,
         key: super::Key,
         variant: PakVariant,
+        oodle: Option<OodleGetter>,
     ) -> Result<Self, super::Error> {
         use std::fmt::Write;
         let mut log = "\n".to_owned();
 
         for ver in Version::iter() {
             match Pak::read(&mut *reader, ver, &key, variant) {
-                Ok(pak) => return Ok(Self { pak, key, variant }),
+                Ok(pak) => {
+                    return Ok(Self {
+                        pak,
+                        key,
+                        variant,
+                        oodle,
+                    })
+                }
                 Err(err) => writeln!(log, "trying version {} failed: {}", ver, err)?,
             }
         }
@@ -177,8 +195,14 @@ impl PakReader {
         version: super::Version,
         key: super::Key,
         variant: PakVariant,
+        oodle: Option<OodleGetter>,
     ) -> Result<Self, super::Error> {
-        Pak::read(reader, version, &key, variant).map(|pak| Self { pak, key, variant })
+        Pak::read(reader, version, &key, variant).map(|pak| Self {
+            pak,
+            key,
+            variant,
+            oodle,
+        })
     }
 
     pub fn version(&self) -> super::Version {
@@ -221,7 +245,14 @@ impl PakReader {
                     mount_point: &self.pak.mount_point,
                     path,
                 };
-                entry.read_file(reader, self.pak.version, &self.pak.compression, ctx, writer)
+                entry.read_file(
+                    reader,
+                    self.pak.version,
+                    &self.pak.compression,
+                    ctx,
+                    self.oodle,
+                    writer,
+                )
             }
             None => Err(super::Error::MissingEntry(path.to_owned())),
         }
