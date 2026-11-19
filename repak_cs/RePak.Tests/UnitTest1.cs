@@ -72,6 +72,9 @@ public class UnitTest1
                 var bytes = pak_reader.Get(stream, file);
                 Console.WriteLine($"Contents: {Encoding.ASCII.GetString(bytes)}");
             }
+            Assert.Equal("hello world\n", Encoding.ASCII.GetString(pak_reader.Get(stream, "nested/file.txt")));
+            var error = Assert.Throws<Exception>(() => pak_reader.Get(stream, "missing.txt"));
+            Assert.Contains("No entry found at missing.txt", error.Message);
         }
     }
 }

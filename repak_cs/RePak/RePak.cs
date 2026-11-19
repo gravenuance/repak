@@ -164,11 +164,17 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
 
         IntPtr bufferPtr;
         ulong length;
-        int result = RePakInterop.pak_reader_get(handle, path, streamCtx, out bufferPtr, out length);
+        IntPtr errorPtr;
+        int result = RePakInterop.pak_reader_get(handle, path, streamCtx, out bufferPtr, out length, out errorPtr);
 
         StreamCallbacks.Free(streamCtx.Context);
 
-        if (result != 0) throw new Exception("Failed to get file");
+        if (result != 0)
+        {
+            var message = Marshal.PtrToStringUTF8(errorPtr);
+            if (errorPtr != IntPtr.Zero) RePakInterop.pak_cstring_drop(errorPtr);
+            throw new Exception($"Failed to get file: {message}");
+        }
 
         byte[] buffer = new byte[length];
         Marshal.Copy(bufferPtr, buffer, 0, (int)length);

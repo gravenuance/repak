@@ -40,7 +40,7 @@ public class RePakInterop
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pak_reader_mount_point(IntPtr reader);
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern int pak_reader_get(IntPtr reader, string path, StreamCallbacks ctx, out IntPtr buffer, out ulong length);
+    public static extern int pak_reader_get(IntPtr reader, string path, StreamCallbacks ctx, out IntPtr buffer, out ulong length, out IntPtr error_message);
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pak_reader_files(IntPtr reader, out ulong length);
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
