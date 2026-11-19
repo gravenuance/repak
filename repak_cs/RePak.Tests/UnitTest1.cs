@@ -112,6 +112,92 @@ public class UnitTest1
     }
 
     [Fact]
+    public void TestNonAsciiEntryNamesRoundTrip()
+    {
+        var names = new[] { "é.txt", "日本語/ファイル.txt", "plain.txt" };
+        using var stream = new MemoryStream();
+        using (var builder = new PakBuilder())
+        {
+            using var writer = builder.Writer(stream);
+            foreach (var name in names) writer.WriteFile(name, Encoding.UTF8.GetBytes("contents of " + name));
+            writer.WriteIndex();
+        }
+
+        using (var builder = new PakBuilder())
+        {
+            using var reader = builder.Reader(stream);
+            Assert.Equal(names.Order(StringComparer.Ordinal), reader.Files().Order(StringComparer.Ordinal));
+            foreach (var name in names)
+                Assert.Equal("contents of " + name, Encoding.UTF8.GetString(reader.Get(stream, name)));
+        }
+    }
+
+    private sealed class FailingStream : MemoryStream
+    {
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new IOException("disk full");
+    }
+
+    [Fact]
+    public void TestStreamThatThrowsOnWriteGivesAManagedException()
+    {
+        using var stream = new FailingStream();
+        using var builder = new PakBuilder();
+        using var writer = builder.Writer(stream);
+
+        var error = Assert.Throws<RePakException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
+        var inner = Assert.IsType<IOException>(error.InnerException);
+        Assert.Equal("disk full", inner.Message);
+    }
+
+    [Fact]
+    public void TestStreamThatThrowsOnReadGivesAManagedException()
+    {
+        using var builder = new PakBuilder();
+        var error = Assert.Throws<RePakException>(() => builder.Reader(new ThrowingReadStream()));
+        Assert.IsType<NotSupportedException>(error.InnerException);
+    }
+
+    private sealed class ThrowingReadStream() : MemoryStream(new byte[300])
+    {
+        public override int Read(Span<byte> buffer) => throw new NotSupportedException("no reads");
+    }
+
+    [Fact]
+    public void TestUnknownCompressionIsAnError()
+    {
+        using var builder = new PakBuilder();
+        var error = Assert.Throws<RePakException>(() => builder.Compression(new[] { Compression.Zlib, (Compression)99 }));
+        Assert.Contains("99 is not a compression method", error.Message);
+    }
+
+    [Fact]
+    public void TestUnknownVersionIsAnError()
+    {
+        using var builder = new PakBuilder();
+        var error = Assert.Throws<RePakException>(() => builder.Writer(new MemoryStream(), (Version)200));
+        Assert.Contains("200 is not a pak version", error.Message);
+    }
+
+    [Fact]
+    public void TestGarbageIsNotAPak()
+    {
+        using var builder = new PakBuilder();
+        using var stream = new MemoryStream(Enumerable.Repeat((byte)0xAB, 300).ToArray());
+        Assert.Throws<RePakException>(() => builder.Reader(stream));
+    }
+
+    [Fact]
+    public void TestWriteIndexTwiceIsRefused()
+    {
+        using var stream = new MemoryStream();
+        using var builder = new PakBuilder();
+        using var writer = builder.Writer(stream);
+        writer.WriteIndex();
+        Assert.Throws<InvalidOperationException>(() => writer.WriteIndex());
+        Assert.Throws<InvalidOperationException>(() => writer.WriteFile("late.txt", new byte[] { 1 }));
+    }
+
+    [Fact]
     public void TestWritePak()
     {
         Console.WriteLine("Writing pak");
@@ -136,7 +222,7 @@ public class UnitTest1
                 Console.WriteLine($"Contents: {Encoding.ASCII.GetString(bytes)}");
             }
             Assert.Equal("hello world\n", Encoding.ASCII.GetString(pak_reader.Get(stream, "nested/file.txt")));
-            var error = Assert.Throws<Exception>(() => pak_reader.Get(stream, "missing.txt"));
+            var error = Assert.Throws<RePakException>(() => pak_reader.Get(stream, "missing.txt"));
             Assert.Contains("No entry found at missing.txt", error.Message);
         }
     }
