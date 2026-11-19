@@ -3,6 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
@@ -24,4 +25,23 @@
   <ItemGroup>
     <ProjectReference Include="../RePak/RePak.csproj" />
   </ItemGroup>
+
+  <!-- The tests load the native library cargo builds: target/debug for Debug, target/release for Release. -->
+  <PropertyGroup>
+    <CargoProfile>debug</CargoProfile>
+    <CargoProfile Condition="'$(Configuration)' == 'Release'">release</CargoProfile>
+    <NativeLibraryName Condition="$([MSBuild]::IsOSPlatform('Windows'))">repak_bind.dll</NativeLibraryName>
+    <NativeLibraryName Condition="$([MSBuild]::IsOSPlatform('OSX'))">librepak_bind.dylib</NativeLibraryName>
+    <NativeLibraryName Condition="'$(NativeLibraryName)' == ''">librepak_bind.so</NativeLibraryName>
+    <NativeLibraryPath>$(MSBuildThisFileDirectory)../../target/$(CargoProfile)/$(NativeLibraryName)</NativeLibraryPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(NativeLibraryPath)" Link="$(NativeLibraryName)" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(NativeLibraryPath)')" />
+  </ItemGroup>
+
+  <Target Name="RequireNativeLibrary" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(NativeLibraryPath)')"
+           Text="$(NativeLibraryPath) is missing. Run 'cargo build -p repak_bind' (with --release for a Release build) from the repository root first." />
+  </Target>
 </Project>
