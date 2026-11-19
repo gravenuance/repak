@@ -162,7 +162,7 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
 
         RePakInterop.pak_cstring_drop(cstring);
 
-        return mountPoint;
+        return mountPoint ?? throw new InvalidOperationException("repak returned no mount point");
     }
 
     public Version GetVersion()
@@ -207,12 +207,18 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
         ulong length;
         IntPtr filesPtr = RePakInterop.pak_reader_files(handle, out length);
         var files = new List<string>();
-        for (ulong i = 0; i < length; i++)
+        try
         {
-            IntPtr currentPtr = Marshal.ReadIntPtr(filesPtr, (int)i * IntPtr.Size);
-            files.Add(Marshal.PtrToStringAnsi(currentPtr));
+            for (ulong i = 0; i < length; i++)
+            {
+                IntPtr currentPtr = Marshal.ReadIntPtr(filesPtr, (int)i * IntPtr.Size);
+                files.Add(Marshal.PtrToStringAnsi(currentPtr) ?? throw new InvalidOperationException("repak returned a null file name"));
+            }
         }
-        RePakInterop.pak_drop_files(filesPtr, length);
+        finally
+        {
+            RePakInterop.pak_drop_files(filesPtr, length);
+        }
         return files.ToArray();
     }
 }
@@ -236,11 +242,17 @@ public class StreamCallbacks
         GCHandle.FromIntPtr(streamCtx).Free();
     }
 
+    // An exception must not cross into native code, so each callback looks the stream up inside its
+    // try and reports a failure through its error return value.
+    private static Stream StreamOf(IntPtr context) =>
+        GCHandle.FromIntPtr(context).Target as Stream
+            ?? throw new InvalidOperationException("Stream callback invoked after its stream was released");
+
     public static long ReadCallback(IntPtr context, IntPtr buffer, ulong bufferLen)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(context).Target;
         try
         {
+            var stream = StreamOf(context);
             byte[] bufferManaged = new byte[bufferLen];
             int bytesRead = stream.Read(bufferManaged, 0, (int)bufferLen);
             Marshal.Copy(bufferManaged, 0, buffer, bytesRead);
@@ -255,12 +267,11 @@ public class StreamCallbacks
 
     public static int WriteCallback(IntPtr context, IntPtr buffer, int bufferLen)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(context).Target;
-        var bufferManaged = new byte[bufferLen];
-        Marshal.Copy(buffer, bufferManaged, 0, bufferLen);
-
         try
         {
+            var stream = StreamOf(context);
+            var bufferManaged = new byte[bufferLen];
+            Marshal.Copy(buffer, bufferManaged, 0, bufferLen);
             stream.Write(bufferManaged, 0, bufferLen);
             return bufferLen;
         }
@@ -273,9 +284,9 @@ public class StreamCallbacks
 
     public static ulong SeekCallback(IntPtr context, long offset, int origin)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(context).Target;
         try
         {
+            var stream = StreamOf(context);
             long newPosition = stream.Seek(offset, (SeekOrigin)origin);
             return (ulong)newPosition;
         }
@@ -288,9 +299,9 @@ public class StreamCallbacks
 
     public static int FlushCallback(IntPtr context)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(context).Target;
         try
         {
+            var stream = StreamOf(context);
             stream.Flush();
             return 0;
         }
