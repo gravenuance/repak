@@ -151,7 +151,7 @@ struct Args {
     #[arg(short, long)]
     aes_key: Option<AesKey>,
 
-    /// Support a specific game's deviations from the standard Unreal Engine pak format
+    /// Support a specific game's deviations from the standard Unreal Engine pak format (marvel-rivals: give the key as the game's IoStore containers use it; its 4-byte words are reversed for the pak)
     #[arg(long, value_enum, default_value_t = PakVariantArg::Standard)]
     variant: PakVariantArg,
 
@@ -173,14 +173,26 @@ impl From<PakVariantArg> for repak::PakVariant {
     }
 }
 
+/// A 256 bit key as typed by the user.
 #[derive(Debug, Clone)]
-struct AesKey(aes::Aes256);
+struct AesKey([u8; 32]);
+impl AesKey {
+    /// The cipher the pak is encrypted with. Marvel Rivals encrypts its paks with the key as typed
+    /// (the form its IoStore containers use) with each 4-byte word byte-reversed; retoc does the same.
+    fn cipher(&self, variant: repak::PakVariant) -> aes::Aes256 {
+        use aes::cipher::KeyInit;
+        let mut key = self.0;
+        if variant == repak::PakVariant::MarvelRivals {
+            key.chunks_mut(4).for_each(<[u8]>::reverse);
+        }
+        aes::Aes256::new_from_slice(&key).expect("an AesKey is 32 bytes")
+    }
+}
 impl std::str::FromStr for AesKey {
     type Err = repak::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use aes::cipher::KeyInit;
         use base64::{engine::general_purpose, Engine as _};
-        let try_parse = |bytes: Vec<_>| aes::Aes256::new_from_slice(&bytes).ok().map(AesKey);
+        let try_parse = |bytes: Vec<u8>| <[u8; 32]>::try_from(bytes).ok().map(AesKey);
         hex::decode(s.strip_prefix("0x").unwrap_or(s))
             .ok()
             .and_then(try_parse)
@@ -196,8 +208,8 @@ impl std::str::FromStr for AesKey {
 
 fn main() -> Result<(), repak::Error> {
     let args = Args::parse();
-    let aes_key = args.aes_key.map(|k| k.0);
     let variant: repak::PakVariant = args.variant.into();
+    let aes_key = args.aes_key.map(|k| k.cipher(variant));
 
     match args.action {
         Action::Info(action) => info(aes_key, variant, action),
