@@ -18,6 +18,6 @@ Build the library with `-p repak_bind`, not `--workspace`: a workspace build als
 ## Using the library
 
 - `new PakBuilder()`, then `Key(...)`, `Compression(...)` and `Variant(PakVariant.MarvelRivals)` as needed. The default is the standard pak format, and a builder is consumed by `Reader` or `Writer`.
-- A failure in repak, including a bad argument such as an unknown `Compression` value, is a `RePakException` with repak's message. When the stream you passed threw, that exception is its `InnerException`.
+- A failure in repak, including a bad argument such as an unknown `Compression` value, is an `IOException` with repak's message. When the stream you passed threw, that exception is its `InnerException`.
 - Marvel Rivals paks need both the key and `PakVariant.MarvelRivals`.
 - Oodle compressed entries are read through the DLL that the `REPAK_OODLE_DLL` environment variable names, an absolute path to an `oo2core_*_win64.dll`. Nothing else is searched and nothing is downloaded. If the variable is unset or the file does not load, reading such an entry fails with "pointer to OodleLZ_Decompress was not provided". The variable is read again on the next read after a failure and kept after a success.

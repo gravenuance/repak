@@ -144,7 +144,7 @@ public class UnitTest1
         using var builder = new PakBuilder();
         using var writer = builder.Writer(stream);
 
-        var error = Assert.Throws<RePakException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
+        var error = Assert.Throws<IOException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
         var inner = Assert.IsType<IOException>(error.InnerException);
         Assert.Equal("disk full", inner.Message);
     }
@@ -156,9 +156,9 @@ public class UnitTest1
         using var builder = new PakBuilder();
         using var writer = builder.Writer(stream);
 
-        var first = Assert.Throws<RePakException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
+        var first = Assert.Throws<IOException>(() => writer.WriteFile("a.txt", new byte[] { 1, 2, 3 }));
         Assert.IsType<IOException>(first.InnerException);
-        var later = Assert.Throws<RePakException>(() => writer.WriteFile("b.txt", new byte[] { 1 }));
+        var later = Assert.Throws<IOException>(() => writer.WriteFile("b.txt", new byte[] { 1 }));
         Assert.IsType<InvalidOperationException>(later.InnerException);
     }
 
@@ -185,7 +185,7 @@ public class UnitTest1
     public void TestStreamThatThrowsOnReadGivesAManagedException()
     {
         using var builder = new PakBuilder();
-        var error = Assert.Throws<RePakException>(() => builder.Reader(new ThrowingReadStream()));
+        var error = Assert.Throws<IOException>(() => builder.Reader(new ThrowingReadStream()));
         Assert.IsType<NotSupportedException>(error.InnerException);
     }
 
@@ -198,7 +198,7 @@ public class UnitTest1
     public void TestUnknownCompressionIsAnError()
     {
         using var builder = new PakBuilder();
-        var error = Assert.Throws<RePakException>(() => builder.Compression(new[] { Compression.Zlib, (Compression)99 }));
+        var error = Assert.Throws<IOException>(() => builder.Compression(new[] { Compression.Zlib, (Compression)99 }));
         Assert.Contains("99 is not a compression method", error.Message);
     }
 
@@ -206,7 +206,7 @@ public class UnitTest1
     public void TestUnknownVersionIsAnError()
     {
         using var builder = new PakBuilder();
-        var error = Assert.Throws<RePakException>(() => builder.Writer(new MemoryStream(), (Version)200));
+        var error = Assert.Throws<IOException>(() => builder.Writer(new MemoryStream(), (Version)200));
         Assert.Contains("200 is not a pak version", error.Message);
     }
 
@@ -215,7 +215,7 @@ public class UnitTest1
     {
         using var builder = new PakBuilder();
         using var stream = new MemoryStream(Enumerable.Repeat((byte)0xAB, 300).ToArray());
-        Assert.Throws<RePakException>(() => builder.Reader(stream));
+        Assert.Throws<IOException>(() => builder.Reader(stream));
     }
 
     [Fact]
@@ -254,7 +254,7 @@ public class UnitTest1
                 Console.WriteLine($"Contents: {Encoding.ASCII.GetString(bytes)}");
             }
             Assert.Equal("hello world\n", Encoding.ASCII.GetString(pak_reader.Get(stream, "nested/file.txt")));
-            var error = Assert.Throws<RePakException>(() => pak_reader.Get(stream, "missing.txt"));
+            var error = Assert.Throws<IOException>(() => pak_reader.Get(stream, "missing.txt"));
             Assert.Contains("No entry found at missing.txt", error.Message);
         }
     }

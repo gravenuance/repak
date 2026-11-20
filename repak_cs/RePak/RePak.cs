@@ -38,21 +38,6 @@ public enum PakVariant : byte
     MarvelRivals = 1
 }
 
-/// <summary>
-/// A failure reported by repak. When the stream being read or written threw, that exception is
-/// the <see cref="Exception.InnerException"/>.
-/// </summary>
-public sealed class RePakException : Exception
-{
-    public RePakException(string message) : base(message)
-    {
-    }
-
-    public RePakException(string message, Exception? innerException) : base(message, innerException)
-    {
-    }
-}
-
 internal static class NativeError
 {
     /// <summary>
@@ -79,11 +64,11 @@ internal static class NativeError
         }
     }
 
-    /// <summary>The failure for a native call that just returned an error, using the calling thread's last native message.</summary>
-    public static RePakException Failure(string action, Exception? streamError = null) =>
+    /// <summary>The failure for a native call that just returned an error, using the calling thread's last native message; when the stream being read or written threw, that exception is the inner exception.</summary>
+    public static IOException Failure(string action, Exception? streamError = null) =>
         Failure(action, RePakInterop.pak_last_error(), streamError);
 
-    public static RePakException Failure(string action, IntPtr message, Exception? streamError = null) =>
+    public static IOException Failure(string action, IntPtr message, Exception? streamError = null) =>
         new($"{action}: {Consume(message)}", streamError);
 }
 
@@ -286,7 +271,7 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
 
         try
         {
-            if (length > int.MaxValue) throw new RePakException($"{path} is too large for a byte array");
+            if (length > int.MaxValue) throw new IOException($"{path} is too large for a byte array");
             byte[] buffer = new byte[(int)length];
             Marshal.Copy(bufferPtr, buffer, 0, buffer.Length);
             return buffer;
@@ -309,7 +294,7 @@ public class PakReader : SafeHandleZeroOrMinusOneIsInvalid
             for (nuint i = 0; i < length; i++)
             {
                 IntPtr currentPtr = Marshal.ReadIntPtr(filesPtr, checked((int)i * IntPtr.Size));
-                files.Add(Marshal.PtrToStringUTF8(currentPtr) ?? throw new RePakException("repak returned a null file name"));
+                files.Add(Marshal.PtrToStringUTF8(currentPtr) ?? throw new IOException("repak returned a null file name"));
             }
         }
         finally
