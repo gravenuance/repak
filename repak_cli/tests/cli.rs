@@ -170,3 +170,108 @@ fn test_cli_hashlist() {
         e5a00aa9991ac8a5ee3109844d84a55583bd20572ad3ffcd42792f3c36b183ad point/root/zeros.bin
     "#});
 }
+
+/// The game key as typed (and as IoStore uses it), and the key a Marvel Rivals pak is encrypted with: every 4-byte word reversed.
+const RIVALS_PROFILE_KEY: &str = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+const RIVALS_PAK_KEY: &str = "8C3D260C85B0DC22C3994889836379A3E09DBFE9C908FBCB2EEF2DBF749DF284";
+const RIVALS_CONTENT: &[u8] = b"marvel rivals entry contents";
+
+fn cipher(key_hex: &str) -> aes::Aes256 {
+    use aes::cipher::KeyInit;
+    aes::Aes256::new_from_slice(&hex::decode(key_hex).unwrap()).unwrap()
+}
+
+/// Writes a one-entry V11 pak with the given cipher key and variant, as a plain repak user would.
+fn write_pak(path: &std::path::Path, key_hex: &str, variant: repak::PakVariant) {
+    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut writer = repak::PakBuilder::new()
+        .key(cipher(key_hex))
+        .variant(variant)
+        .writer(file, repak::Version::V11, "../../../".to_string(), Some(0));
+    writer
+        .write_file("Marvel/Content/Foo.uasset", false, RIVALS_CONTENT)
+        .unwrap();
+    writer.write_index().unwrap();
+}
+
+#[test]
+fn test_cli_marvel_rivals_takes_the_profile_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let pak = dir.path().join("rivals.pak");
+    write_pak(&pak, RIVALS_PAK_KEY, repak::PakVariant::MarvelRivals);
+
+    let assert = cargo_bin_cmd!("repak")
+        .args([
+            "--variant",
+            "marvel-rivals",
+            "--aes-key",
+            RIVALS_PROFILE_KEY,
+        ])
+        .args(["list", "-s", ""])
+        .arg(&pak)
+        .assert();
+    assert
+        .success()
+        .stdout("../../../Marvel/Content/Foo.uasset\n");
+
+    let assert = cargo_bin_cmd!("repak")
+        .args([
+            "--variant",
+            "marvel-rivals",
+            "--aes-key",
+            &format!("0x{RIVALS_PROFILE_KEY}"),
+        ])
+        .args(["get", "-s", "../../../"])
+        .arg(&pak)
+        .arg("Marvel/Content/Foo.uasset")
+        .assert();
+    assert.success().stdout(RIVALS_CONTENT);
+}
+
+#[test]
+fn test_cli_marvel_rivals_pack_is_encrypted_with_the_reversed_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    std::fs::create_dir_all(input.join("Marvel/Content")).unwrap();
+    std::fs::write(input.join("Marvel/Content/Foo.uasset"), RIVALS_CONTENT).unwrap();
+    let pak = dir.path().join("packed.pak");
+
+    cargo_bin_cmd!("repak")
+        .args([
+            "--variant",
+            "marvel-rivals",
+            "--aes-key",
+            RIVALS_PROFILE_KEY,
+        ])
+        .args(["pack", "-q", "--version", "V11"])
+        .arg(&input)
+        .arg(&pak)
+        .assert()
+        .success();
+
+    let mut file = std::fs::File::open(&pak).unwrap();
+    let reader = repak::PakBuilder::new()
+        .key(cipher(RIVALS_PAK_KEY))
+        .variant(repak::PakVariant::MarvelRivals)
+        .reader(&mut file)
+        .unwrap();
+    assert_eq!(
+        reader.get("Marvel/Content/Foo.uasset", &mut file).unwrap(),
+        RIVALS_CONTENT
+    );
+}
+
+#[test]
+fn test_cli_standard_variant_uses_the_key_as_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let pak = dir.path().join("standard.pak");
+    write_pak(&pak, RIVALS_PROFILE_KEY, repak::PakVariant::Standard);
+
+    let assert = cargo_bin_cmd!("repak")
+        .args(["--aes-key", RIVALS_PROFILE_KEY])
+        .args(["get", "-s", "../../../"])
+        .arg(&pak)
+        .arg("Marvel/Content/Foo.uasset")
+        .assert();
+    assert.success().stdout(RIVALS_CONTENT);
+}

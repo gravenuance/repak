@@ -28,7 +28,7 @@ Commands:
 
 Options:
   -a, --aes-key <AES_KEY>  256 bit AES encryption key as base64 or hex string if the pak is encrypted
-      --variant <VARIANT>  Support a specific game's deviations from the standard Unreal Engine pak format [default: standard] [possible values: standard, marvel-rivals]
+      --variant <VARIANT>  Support a specific game's deviations from the standard Unreal Engine pak format (marvel-rivals: give the key as the game's IoStore containers use it; its 4-byte words are reversed for the pak) [default: standard] [possible values: standard, marvel-rivals]
   -h, --help               Print help
   -V, --version            Print version
 ```
