@@ -32,7 +32,7 @@ type OodleLzDecompress = unsafe extern "system" fn(
     i32,
 ) -> isize;
 
-struct Loaded {
+pub(crate) struct Loaded {
     // Keeps the DLL mapped for as long as `decompress` may be called.
     _library: libloading::Library,
     decompress: OodleLzDecompress,
@@ -109,9 +109,18 @@ fn require(loaded: Option<&Loaded>) -> Result<repak::OodleDecompress, Box<dyn st
     }
 }
 
+/// `getter` with the cache and the DLL path supplied by the caller instead of the process-wide
+/// cache and the environment.
+pub(crate) fn getter_in(
+    cell: &OnceLock<Loaded>,
+    variable: impl FnOnce() -> Option<OsString>,
+) -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
+    require(library_in(cell, variable))
+}
+
 /// The getter handed to `PakBuilder::oodle`; fails when the DLL does not load.
 pub fn getter() -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
-    require(library())
+    getter_in(&OODLE, || std::env::var_os(ENV_VAR))
 }
 
 #[cfg(test)]

@@ -756,15 +756,24 @@ mod tests {
         bytes
     }
 
+    /// The Oodle getter with an empty cache and a DLL path that does not exist, so the result
+    /// depends neither on `REPAK_OODLE_DLL` nor on a library another test loaded.
+    fn getter_for_a_missing_dll() -> Result<repak::OodleDecompress, Box<dyn std::error::Error>> {
+        let missing = std::env::temp_dir().join("repak_bind_no_such_oo2core_9_win64.dll");
+        oodle::getter_in(&std::sync::OnceLock::new(), || {
+            Some(missing.into_os_string())
+        })
+    }
+
     #[test]
     fn an_oodle_entry_without_a_loadable_dll_says_why() {
         let mut memory = Memory::new(oodle_marked_pak());
-        let missing = std::env::temp_dir().join("repak_bind_no_such_oo2core_9_win64.dll");
-        std::env::set_var(oodle::ENV_VAR, missing);
         let (mut buffer, mut length, mut error) = (std::ptr::null_mut(), 0, std::ptr::null_mut());
         // SAFETY: the pointers come from this library or live for the call.
         let result = unsafe {
-            let reader = pak_builder_reader(pak_builder_new(), callbacks(&mut memory));
+            let builder =
+                Box::into_raw(Box::new(PakBuilder::new().oodle(getter_for_a_missing_dll)));
+            let reader = pak_builder_reader(builder, callbacks(&mut memory));
             assert!(!reader.is_null());
             let result = pak_reader_get(
                 reader,
@@ -777,7 +786,6 @@ mod tests {
             pak_reader_drop(reader);
             result
         };
-        std::env::remove_var(oodle::ENV_VAR);
         assert_eq!(result, 1);
         // SAFETY: `error` is a message this library returned.
         let message = unsafe {
