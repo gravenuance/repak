@@ -1,5 +1,4 @@
 # TODO
 
-- [ ] **repak_bind Oodle test changes the process environment.** `an_oodle_entry_without_a_loadable_dll_says_why` (repak_bind/src/lib.rs) sets and removes `REPAK_OODLE_DLL` while tests run in parallel, never restores a value the developer had set, and fails if another test already loaded a real DLL into the process-wide cache. Inject the path into the loader instead of reading the variable in the test, or serialise the Oodle tests behind one lock and restore the old value. From the 2026-11-19 re-review of the bindings merge.
 - [ ] **`Error::OodleUnavailable` changed shape.** It now carries the getter's reason (`OodleUnavailable(String)`), which breaks any `match` on the unit variant. Nothing in this workspace or retoc matches on it (checked 2026-11-19); bump the crate version with the next release of the fork.
 - [ ] **Cross-target check of repak_bind.** `cargo check --target aarch64-unknown-linux-gnu -p repak_bind` was not run (target not installed; the x86_64 Linux target stops on zstd-sys needing a C cross-compiler). Run it in WSL or CI.
